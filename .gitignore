@@ -1,0 +1,14 @@
+# Build output
+/build/
+
+# Machine-local material: never tracked
+/scripts/
+/datas/
+/doc/notes/
+
+# Editor / OS noise
+.vs/
+.vscode/
+*.user
+*.log
+Thumbs.db
