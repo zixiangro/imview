@@ -34,6 +34,10 @@ add_executable(imview
     src/shell_actions.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/generated/imview.rc"
 )
+target_compile_definitions(imview PRIVATE
+    IMVIEW_VERSION="${PROJECT_VERSION}"
+    IMVIEW_HOMEPAGE="https://github.com/zixiangro/imview"
+)
 eui_neo_configure_app(imview)
 
 # Logic tests: no window, no EUI — just the helpers that carry format logic.

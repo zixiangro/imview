@@ -15,6 +15,7 @@
 #include <dwmapi.h>
 
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "gdi32.lib")
 
 // GLFW native access, used only to resolve the HWND behind the EUI window.
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -38,6 +39,52 @@ float gLeftControlsWidth = 0.0f;
 
 // Edge band that behaves as a resize border, in logical units.
 constexpr float kResizeBorder = 5.0f;
+
+// DWM attributes used to keep a custom borderless frame free of native
+// rounding and border lines, which otherwise show as gaps around a maximised
+// window.
+enum : DWORD {
+    kWindowCornerPreference = 33,
+    kWindowBorderColor = 34,
+    kVisibleFrameBorderThickness = 37,
+};
+enum : DWORD {
+    kCornerDoNotRound = 1,
+    kCornerRound = 2,
+    kColorNone = 0xFFFFFFFE,
+    kColorDefault = 0xFFFFFFFF,
+};
+
+void applyDwmFrameAppearance(HWND hwnd, bool maximized) {
+    const DWORD corners = maximized ? kCornerDoNotRound : kCornerRound;
+    DwmSetWindowAttribute(hwnd, kWindowCornerPreference, &corners, sizeof(corners));
+    const DWORD borderColor = maximized ? kColorNone : kColorDefault;
+    DwmSetWindowAttribute(hwnd, kWindowBorderColor, &borderColor, sizeof(borderColor));
+    const DWORD borderThickness = 0;
+    DwmSetWindowAttribute(hwnd, kVisibleFrameBorderThickness, &borderThickness,
+                          sizeof(borderThickness));
+}
+
+// DWM still reveals the desktop at the rounded top corners of a window that is
+// not in the native zoomed state. A full-window region makes the maximised
+// frame rectangular; clearing it restores the rounded window.
+void applyMaximizedRegion(HWND hwnd, bool maximized) {
+    if (!maximized) {
+        SetWindowRgn(hwnd, nullptr, TRUE);
+        return;
+    }
+    RECT window{};
+    if (!GetWindowRect(hwnd, &window)) return;
+    const int width = window.right - window.left;
+    const int height = window.bottom - window.top;
+    if (width <= 0 || height <= 0) return;
+    HRGN region = CreateRectRgn(0, 0, width, height);
+    if (region == nullptr) return;
+    // On success the system owns the region and frees it with the window.
+    if (SetWindowRgn(hwnd, region, TRUE) == 0) {
+        DeleteObject(region);
+    }
+}
 
 // The window is never put into the native "zoomed" state: Windows then forces a
 // maximized rect inflated by the (invisible) frame, and SetWindowPos is ignored
@@ -87,13 +134,17 @@ void applyMaximized(bool maximize) {
                      monitor.rcWork.right - monitor.rcWork.left,
                      monitor.rcWork.bottom - monitor.rcWork.top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
+        applyDwmFrameAppearance(hwnd, true);
+        applyMaximizedRegion(hwnd, true);
     } else {
         gMaximized = false;
+        applyMaximizedRegion(hwnd, false);
         SetWindowPos(hwnd, nullptr,
                      gRestoreRect.left, gRestoreRect.top,
                      gRestoreRect.right - gRestoreRect.left,
                      gRestoreRect.bottom - gRestoreRect.top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
+        applyDwmFrameAppearance(hwnd, false);
     }
 }
 
@@ -168,6 +219,10 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
         }
 
         case WM_SIZE:
+            if (gMaximized) {
+                // Keep the rectangular region in sync with the window bounds.
+                applyMaximizedRegion(hwnd, true);
+            }
             if (wParam == SIZE_MAXIMIZED && !gMaximized) {
                 // Maximized by the system (Aero Snap / Win+Up): convert it once
                 // the native maximize has settled.
@@ -229,17 +284,37 @@ void installBorderlessWindow(float titleBarLogicalHeight,
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                  SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-    // Rounded corners on Windows 11.
-    enum : DWORD { kCornerPreference = 33 };
-    enum : DWORD { kCornerRound = 2 };
-    const DWORD preference = kCornerRound;
-    DwmSetWindowAttribute(hwnd, kCornerPreference, &preference, sizeof(preference));
+    // Rounded corners on Windows 11, square while maximised, and no native
+    // window border line around the custom frame.
+    applyDwmFrameAppearance(hwnd, false);
 #endif
 }
 
 void minimizeWindow() {
 #if defined(_WIN32)
     if (HWND hwnd = nativeWindow()) ShowWindow(hwnd, SW_MINIMIZE);
+#endif
+}
+
+void centerWindow() {
+#if defined(_WIN32)
+    HWND hwnd = nativeWindow();
+    if (hwnd == nullptr) return;
+    RECT window{};
+    if (!GetWindowRect(hwnd, &window)) return;
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        return;
+    }
+    const int width = window.right - window.left;
+    const int height = window.bottom - window.top;
+    const int x = monitor.rcWork.left +
+                  (monitor.rcWork.right - monitor.rcWork.left - width) / 2;
+    const int y = monitor.rcWork.top +
+                  (monitor.rcWork.bottom - monitor.rcWork.top - height) / 2;
+    SetWindowPos(hwnd, nullptr, x, y, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 #endif
 }
 

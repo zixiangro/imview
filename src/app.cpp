@@ -19,10 +19,22 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+#include <glad/glad.h>
+#endif
+
+#ifndef IMVIEW_VERSION
+#define IMVIEW_VERSION "0.1.0"
+#endif
+#ifndef IMVIEW_HOMEPAGE
+#define IMVIEW_HOMEPAGE "https://github.com/zixiangro/imview"
+#endif
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -75,12 +87,81 @@ const eui::Color kWindowCloseHover{0.769f, 0.169f, 0.110f, 1.0f}; // #C42B1C
 constexpr float kToolbarHeight = 36.0f;
 constexpr float kRadius = 4.0f;
 
+constexpr const char* kVersion = IMVIEW_VERSION;
+constexpr const char* kProjectUrl = IMVIEW_HOMEPAGE;
+
 // Sidebar geometry
 constexpr float kSidebarWidth = 240.0f;
 constexpr float kSidebarRowHeight = 22.0f;
 constexpr float kSidebarHeaderHeight = 30.0f;
 
 // --- state ------------------------------------------------------------------
+
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+// Owns a texture uploaded by the application. A shared sampler, installed
+// below, switches external-image filtering with the zoom state.
+bool gGpuResourcesAlive = true;
+
+struct GpuSource {
+    eui::GpuDeviceInfo device;
+    unsigned int texture = 0;
+
+    ~GpuSource() {
+        if (texture != 0 && gGpuResourcesAlive) {
+            glDeleteTextures(1, &texture);
+        }
+    }
+};
+
+// EUI-NEO binds a linear sampler for external GPU images. ImView owns the
+// image texture, so it substitutes one shared sampler for those non-zero
+// bindings; unbind (0) calls pass through unchanged.
+PFNGLBINDSAMPLERPROC g_realBindSampler = nullptr;
+GLuint g_imageSampler = 0;
+bool g_imageSamplerNearest = false;
+
+void GLAPIENTRY bindImageSampler(GLuint unit, GLuint sampler) {
+    if (g_realBindSampler == nullptr) return;
+    const GLuint bound = sampler != 0 && g_imageSampler != 0 ? g_imageSampler : sampler;
+    g_realBindSampler(unit, bound);
+}
+
+void setImageSamplerFilter(bool nearest) {
+    if (g_imageSampler == 0 || g_imageSamplerNearest == nearest) return;
+    g_imageSamplerNearest = nearest;
+    const GLint filter = nearest ? GL_NEAREST : GL_LINEAR;
+    glSamplerParameteri(g_imageSampler, GL_TEXTURE_MIN_FILTER, filter);
+    glSamplerParameteri(g_imageSampler, GL_TEXTURE_MAG_FILTER, filter);
+}
+
+void installImageSampler() {
+    if (g_imageSampler != 0) return;
+    if (glad_glGenSamplers == nullptr || glad_glSamplerParameteri == nullptr ||
+        glad_glBindSampler == nullptr) {
+        return;
+    }
+    glGenSamplers(1, &g_imageSampler);
+    if (g_imageSampler == 0) return;
+    glSamplerParameteri(g_imageSampler, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glSamplerParameteri(g_imageSampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glSamplerParameteri(g_imageSampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glSamplerParameteri(g_imageSampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    g_realBindSampler = glad_glBindSampler;
+    glad_glBindSampler = bindImageSampler;
+}
+
+void shutdownImageSampler() {
+    if (g_realBindSampler != nullptr) {
+        glad_glBindSampler = g_realBindSampler;
+        g_realBindSampler = nullptr;
+    }
+    if (g_imageSampler != 0) {
+        glDeleteSamplers(1, &g_imageSampler);
+        g_imageSampler = 0;
+    }
+    g_imageSamplerNearest = false;
+}
+#endif
 
 struct ImageEntry {
     int id = 0;
@@ -90,6 +171,12 @@ struct ImageEntry {
     // Second mailbox holding the same frame, used when this image is drawn in
     // another cell (Q cover). Each stream can only be consumed once.
     std::shared_ptr<eui::ImageStream> altStream;
+    bool streamPrimed = false;
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+    std::shared_ptr<GpuSource> gpuSource;
+#endif
+    std::shared_ptr<const eui::GpuImage> gpuImage;
+    std::uint64_t gpuRevision = 0;
     std::shared_ptr<std::vector<std::uint8_t>> pixels; // RGBA8, top-down
     int width = 0;
     int height = 0;
@@ -181,6 +268,8 @@ struct AppState {
     float menuY = 0.0f;
     int menuPane = -1;
     int menuIndex = -1;
+    // About dialog.
+    bool aboutOpen = false;
 };
 
 AppState& state() {
@@ -188,12 +277,30 @@ AppState& state() {
     return instance;
 }
 
-// The popup menu swallows clicks, so the title bar must stop acting as a drag
-// band while it is open. Everything that opens or closes a menu goes through
-// here so the two never drift apart.
+// The popup menu and the About dialog swallow clicks, so the title bar must
+// stop acting as a drag band while either is open. Everything that opens or
+// closes one of them goes through here so the three never drift apart.
+void syncTitleBarDrag() {
+    imview::frame::setTitleBarDragEnabled(!state().menuOpen && !state().aboutOpen);
+}
+
 void setMenuOpen(bool open) {
     state().menuOpen = open;
-    imview::frame::setTitleBarDragEnabled(!open);
+    syncTitleBarDrag();
+    app::requestUpdate();
+}
+
+void openAboutDialog() {
+    state().menuOpen = false;
+    state().aboutOpen = true;
+    syncTitleBarDrag();
+    app::requestUpdate();
+}
+
+void closeAboutDialog() {
+    if (!state().aboutOpen) return;
+    state().aboutOpen = false;
+    syncTitleBarDrag();
     app::requestUpdate();
 }
 
@@ -236,6 +343,69 @@ void submitFrame(const ImageEntry& entry, const std::shared_ptr<eui::ImageStream
     frame.format = eui::ImagePixelFormat::RGBA8;
     stream->submit(std::move(frame));
 }
+
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+// Uploads the decoded frame once into an app-owned texture and wraps it as an
+// external GpuImage. The shared image sampler is switched between LINEAR and
+// NEAREST by the zoom state.
+bool ensureGpuImage(ImageEntry& entry, bool nearest) {
+    if (!entry.loaded || !entry.pixels || entry.width <= 0 || entry.height <= 0) {
+        return false;
+    }
+    setImageSamplerFilter(nearest);
+    if (!entry.gpuSource) {
+        const eui::GpuDeviceInfo device = eui::image::gpuDevice();
+        if (device.api != eui::GpuApi::OpenGL || device.identity == 0) return false;
+
+        auto source = std::make_shared<GpuSource>();
+        source->device = device;
+        glGenTextures(1, &source->texture);
+        if (source->texture == 0) return false;
+        GLint previousTexture = 0;
+        GLint previousAlignment = 4;
+        GLint previousRowLength = 0;
+        GLint previousSkipPixels = 0;
+        GLint previousSkipRows = 0;
+        GLint previousSwapBytes = GL_FALSE;
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+        glGetIntegerv(GL_UNPACK_ALIGNMENT, &previousAlignment);
+        glGetIntegerv(GL_UNPACK_ROW_LENGTH, &previousRowLength);
+        glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &previousSkipPixels);
+        glGetIntegerv(GL_UNPACK_SKIP_ROWS, &previousSkipRows);
+        glGetIntegerv(GL_UNPACK_SWAP_BYTES, &previousSwapBytes);
+        glBindTexture(GL_TEXTURE_2D, source->texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_FALSE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, entry.width, entry.height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, entry.pixels->data());
+        glPixelStorei(GL_UNPACK_ALIGNMENT, previousAlignment);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, previousRowLength);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, previousSkipPixels);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, previousSkipRows);
+        glPixelStorei(GL_UNPACK_SWAP_BYTES, previousSwapBytes);
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture));
+        entry.gpuSource = std::move(source);
+    }
+
+    if (!entry.gpuImage) {
+        eui::GpuImageDescriptor descriptor{entry.gpuSource->device, entry.width,
+                                           entry.height, entry.gpuSource->texture};
+        std::shared_ptr<const eui::GpuImage> image =
+            eui::image::importGpuImage(descriptor, entry.gpuSource);
+        if (!image) return false;
+        entry.gpuImage = std::move(image);
+        entry.gpuRevision = 1;
+    }
+    return true;
+}
+#endif
 
 // --- view math (P2 zoom/pan) --------------------------------------------------
 
@@ -474,11 +644,24 @@ void closePane(int paneIndex) {
     setMenuOpen(false);
 }
 
-// Toolbar entry point: pick a folder and add (or replace) a pane.
+// Toolbar entry point: pick one or more folders and add (or replace) panes.
 void openFolder() {
-    const std::string directory = imview::shell::pickFolder(
+    if (state().reviewMode) return;
+    const std::vector<std::string> directories = imview::shell::pickFolders(
         state().folders.empty() ? std::string() : state().folders.front().dir);
-    if (!directory.empty()) addFolder(directory);
+    if (directories.empty()) return;
+    if (directories.size() == 1) {
+        addFolder(directories.front());
+        return;
+    }
+    // A multi-selection replaces the pane layout so every chosen folder gets a
+    // pane; the sidebar shows at most two folders.
+    state().folders.clear();
+    state().selected.clear();
+    for (const std::string& directory : directories) {
+        if (state().folders.size() >= 2) break;
+        addFolder(directory);
+    }
 }
 
 // Click handling. Ctrl toggles a row across both panes.
@@ -512,6 +695,8 @@ void openSingleInGrid(int paneIndex, int index) {
     state().images.clear();
     state().soloId = -1;
     state().peekId = -1;
+    state().moveSourceId = -1;
+    state().moveTargetId = -1;
     state().zoom = 1.0f;
     state().localMode = false;
     state().qSwapActive = false;
@@ -895,10 +1080,18 @@ void computeStats(ImageEntry& entry) {
     double sumB = 0.0;
     int count = 0;
     const auto* data = entry.pixels->data();
-    for (int row = 0; row < kSteps; ++row) {
-        const float v = v0 + (v1 - v0) * ((static_cast<float>(row) + 0.5f) / kSteps);
-        for (int column = 0; column < kSteps; ++column) {
-            const float u = u0 + (u1 - u0) * ((static_cast<float>(column) + 0.5f) / kSteps);
+    // A click without dragging is still a valid 1x1 ROI. Use a single sample in
+    // that case instead of repeating the same pixel 128x128 times.
+    const int columns = u1 > u0 ? kSteps : 1;
+    const int rows = v1 > v0 ? kSteps : 1;
+    for (int row = 0; row < rows; ++row) {
+        const float v = rows == 1
+            ? (v0 + v1) * 0.5f
+            : v0 + (v1 - v0) * ((static_cast<float>(row) + 0.5f) / kSteps);
+        for (int column = 0; column < columns; ++column) {
+            const float u = columns == 1
+                ? (u0 + u1) * 0.5f
+                : u0 + (u1 - u0) * ((static_cast<float>(column) + 0.5f) / kSteps);
             // Inverse of the clockwise display rotation.
             float su = u;
             float sv = v;
@@ -1132,6 +1325,7 @@ void startLoad(const std::string& path) {
                 // Q cover or a later mode switch.
                 submitFrame(*entry, entry->stream);
                 submitFrame(*entry, entry->altStream);
+                entry->streamPrimed = true;
             } else {
                 entry->failed = true;
             }
@@ -1231,6 +1425,56 @@ void composeClickArea(eui::Ui& ui, const std::string& id, float width, float hei
         .onClick(onClick)
         .cursor(eui::CursorShape::Hand)
         .build();
+}
+
+// Single-line text clipped to a rectangle, used by the About dialog.
+void composeClippedText(eui::Ui& ui, const std::string& id, float x, float y,
+                        float width, float height, const std::string& text,
+                        const eui::Color& color, float fontSize,
+                        eui::HorizontalAlign align = eui::HorizontalAlign::Left) {
+    ui.stack(id + ".clip").position(x, y).size(width, height).clip().content([&] {
+        ui.text(id + ".text")
+            .position(0.0f, 0.0f)
+            .size(width, height)
+            .text(text)
+            .color(color)
+            .fontSize(fontSize)
+            .horizontalAlign(align)
+            .verticalAlign(eui::VerticalAlign::Center)
+            .build();
+    }).build();
+}
+
+// Text button used by the About dialog.
+void composeTextButton(eui::Ui& ui, const std::string& id, float x, float y,
+                       float width, float height, const std::string& label,
+                       bool primary, bool enabled,
+                       const std::function<void()>& onTap) {
+    const eui::Color base = primary ? kAccent : kChipIdle;
+    const eui::Color hover = primary ? kAccentHover : kChipIdleHover;
+    const eui::Color pressed = primary ? kAccentPressed : kChipPressed;
+    ui.stack(id).position(x, y).size(width, height).content([&] {
+        ui.rect(id + ".bg").size(width, height)
+            .color(base)
+            .radius(kRadius)
+            .border(primary ? 0.0f : 1.0f, primary ? kAccent : kBorderStrong)
+            .states(enabled ? base : eui::Color{0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? hover : eui::Color{0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? pressed : eui::Color{0.0f, 0.0f, 0.0f, 0.0f})
+            .build();
+        ui.text(id + ".label").size(width, height).text(label)
+            .color(primary ? (enabled ? kWhite : eui::Color{1.0f, 1.0f, 1.0f, 0.38f})
+                          : (enabled ? kTextPrimary : kTextSecondary))
+            .fontSize(12.0f)
+            .horizontalAlign(eui::HorizontalAlign::Center)
+            .verticalAlign(eui::VerticalAlign::Center)
+            .build();
+        ui.rect(id + ".hit").size(width, height)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .onClick(enabled ? onTap : std::function<void()>{})
+            .cursor(enabled ? eui::CursorShape::Hand : eui::CursorShape::Arrow)
+            .build();
+    }).build();
 }
 
 // Small square text button used by the sidebar pane header.
@@ -1348,8 +1592,8 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
             .cursor(eui::CursorShape::Arrow)
             .build();
 
-        // Left: the Open menu button (VS Code style menu entry point).
-        const float menuWidth = 58.0f;
+        // Left: the ImView menu button (VS Code style menu entry point).
+        const float menuWidth = 66.0f;
         ui.stack("toolbar.menu").position(8.0f, centerY)
             .size(menuWidth, controlHeight).content([&] {
                 const eui::Color base = kChipIdle;
@@ -1357,7 +1601,7 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
                     .color(base).radius(kRadius)
                     .states(base, kChipIdleHover, kChipPressed).build();
                 ui.text("toolbar.menu.label").position(10.0f, 0.0f)
-                    .size(menuWidth - 14.0f, controlHeight).text("Open")
+                    .size(menuWidth - 14.0f, controlHeight).text("ImView")
                     .color(kTextPrimary).fontSize(12.0f)
                     .verticalAlign(eui::VerticalAlign::Center).build();
                 composeClickArea(ui, "toolbar.menu.hit", menuWidth, controlHeight,
@@ -1631,10 +1875,8 @@ void composeCellInteractions(eui::Ui& ui, int entryId, const std::string& id,
                 const float x1 = std::max(state().dragAnchorX, state().dragCurrentX);
                 const float y0 = std::min(state().dragAnchorY, state().dragCurrentY);
                 const float y1 = std::max(state().dragAnchorY, state().dragCurrentY);
-                if (x1 - x0 > 0.002f && y1 - y0 > 0.002f) {
-                    // Same relative region on every image.
-                    applySharedSelection(x0, y0, x1, y1);
-                }
+                // Even a click without movement is a one-pixel ROI.
+                applySharedSelection(x0, y0, x1, y1);
                 app::requestUpdate();
             } else if (event.button == eui::PointerButton::Right &&
                        state().movingSelection) {
@@ -1750,9 +1992,11 @@ void composeCellInteractions(eui::Ui& ui, int entryId, const std::string& id,
 
 void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
                  float width, float height,
-                 const std::shared_ptr<eui::ImageStream>& streamOverride = nullptr) {
+                 const std::shared_ptr<eui::ImageStream>& streamOverride = nullptr,
+                 ImageEntry* sourceOverride = nullptr) {
     const std::string id = "cell" + std::to_string(entry.id);
     const float zoom = state().zoom;
+    ImageEntry& source = sourceOverride != nullptr ? *sourceOverride : entry;
 
     // Keep the cached cell rect and pan limits, and re-clamp the stored offset
     // after zoom changes, in one place.
@@ -1783,19 +2027,40 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
     // The histogram starts below the corner buttons when they are drawn.
     const bool topCornerFree = !(showCloseButton || showMoveButton);
 
+    // Prefer the app-owned external texture; the shared sampler provides
+    // NEAREST filtering while zoomed. Streams remain the fallback on backends
+    // or devices where the external texture cannot be imported.
+    bool useGpuImage = false;
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+    useGpuImage = ensureGpuImage(source, state().zoom > 1.0f);
+    if (useGpuImage) {
+        // A later switch back to the stream path needs a fresh frame.
+        source.streamPrimed = false;
+    }
+#endif
+    if (!useGpuImage && !streamOverride && !source.streamPrimed && source.loaded) {
+        submitFrame(source, source.stream);
+        source.streamPrimed = true;
+    }
+
     ui.stack(id).position(x, y).size(width, height).clip().content([&] {
         // Flat surface with a hairline border, like a VS Code editor group.
         ui.rect(id + ".bg").size(width, height).color(kPanel)
             .border(1.0f, kBorder)
             .build();
-        ui.image(id + ".img").size(width, height)
-            .stream(streamOverride ? streamOverride : entry.stream)
+        auto image = ui.image(id + ".img");
+        image.size(width, height)
             .fit(eui::ImageFit::Contain)
             .transformOrigin(0.5f, 0.5f)
             .scale(zoom, zoom)
             .rotate(static_cast<float>(entry.rotation) * 1.5707963f)
-            .translate(offsetX, offsetY)
-            .build();
+            .translate(offsetX, offsetY);
+        if (useGpuImage) {
+            image.texture(source.gpuImage, source.gpuRevision);
+        } else {
+            image.stream(streamOverride ? streamOverride : source.stream);
+        }
+        image.build();
         if (moveSource || moveTarget) {
             ui.rect(id + ".move.frame").size(width, height)
                 .color(moveTarget ? eui::Color{0.0f, 0.471f, 0.831f, 0.18f}
@@ -1823,17 +2088,20 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
             sx1 = std::max(state().dragAnchorX, state().dragCurrentX);
             sy0 = std::min(state().dragAnchorY, state().dragCurrentY);
             sy1 = std::max(state().dragAnchorY, state().dragCurrentY);
-            drawSelection = (sx1 - sx0) > 0.001f && (sy1 - sy0) > 0.001f;
+            drawSelection = true;
         } else if (localMode && entry.hasSelection) {
             sx0 = std::min(entry.selX0, entry.selX1);
             sx1 = std::max(entry.selX0, entry.selX1);
             sy0 = std::min(entry.selY0, entry.selY1);
             sy1 = std::max(entry.selY0, entry.selY1);
-            drawSelection = (sx1 - sx0) > 0.001f && (sy1 - sy0) > 0.001f;
+            drawSelection = true;
         }
         if (drawSelection) {
+            // A one-pixel ROI still needs a visible marker.
+            const float selectionWidth = std::max((sx1 - sx0) * shown.w, 1.0f);
+            const float selectionHeight = std::max((sy1 - sy0) * shown.h, 1.0f);
             ui.rect(id + ".sel").position(shown.x + sx0 * shown.w, shown.y + sy0 * shown.h)
-                .size((sx1 - sx0) * shown.w, (sy1 - sy0) * shown.h)
+                .size(selectionWidth, selectionHeight)
                 .color({0.0f, 0.0f, 0.0f, 0.0f})
                 .border(1.5f, dragging ? kSelectionDrag : kSelectionFixed)
                 .build();
@@ -1864,11 +2132,23 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
 // same ids keeps the instance (and its texture) alive across mode switches.
 void composeCellKeepAlive(eui::Ui& ui, ImageEntry& entry) {
     const std::string id = "cell" + std::to_string(entry.id);
+    bool useGpuImage = false;
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+    useGpuImage = ensureGpuImage(entry, state().zoom > 1.0f);
+#endif
+    if (!useGpuImage && !entry.streamPrimed && entry.loaded) {
+        submitFrame(entry, entry.stream);
+        entry.streamPrimed = true;
+    }
     ui.stack(id).position(0.0f, 0.0f).size(1.0f, 1.0f).opacity(0.0f).content([&] {
-        ui.image(id + ".img").size(1.0f, 1.0f)
-            .stream(entry.stream)
-            .fit(eui::ImageFit::Contain)
-            .build();
+        auto image = ui.image(id + ".img");
+        image.size(1.0f, 1.0f).fit(eui::ImageFit::Contain);
+        if (useGpuImage) {
+            image.texture(entry.gpuImage, entry.gpuRevision);
+        } else {
+            image.stream(entry.stream);
+        }
+        image.build();
     }).build();
 }
 
@@ -1906,8 +2186,10 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
 
     // Q cover: the right image is painted in the left cell while held.
     std::shared_ptr<eui::ImageStream> leftCover;
+    ImageEntry* leftCoverSource = nullptr;
     if (state().qSwapActive && count == 2) {
         leftCover = state().images[1].altStream;
+        leftCoverSource = &state().images[1];
     }
 
     for (int index = 0; index < count; ++index) {
@@ -1920,25 +2202,79 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
         const float y = y0 + row * (cellHeight + gap);
         composeCell(ui, state().images[static_cast<std::size_t>(index)],
                     x, y, cellWidth, cellHeight,
-                    index == 0 ? leftCover : nullptr);
+                    index == 0 ? leftCover : nullptr,
+                    index == 0 ? leftCoverSource : nullptr);
     }
 }
 
 // --- sidebar rendering --------------------------------------------------------
+
+void composeAboutDialog(eui::Ui& ui, const eui::Screen& screen) {
+    if (!state().aboutOpen) return;
+
+    const float width = std::min(480.0f, screen.width - 32.0f);
+    const float height = std::min(300.0f, screen.height - 32.0f);
+    const float x = (screen.width - width) * 0.5f;
+    const float y = (screen.height - height) * 0.5f;
+    const float innerX = 24.0f;
+    const float innerW = width - 48.0f;
+    const float buttonsY = height - 48.0f;
+
+    ui.rect("about.backdrop").size(screen.width, screen.height).zIndex(500)
+        .color({0.0f, 0.0f, 0.0f, 0.55f})
+        .onClick([] {})
+        .cursor(eui::CursorShape::Arrow)
+        .build();
+    ui.stack("about").position(x, y).size(width, height).zIndex(501).content([&] {
+        ui.rect("about.bg").size(width, height).color(kPanel)
+            .radius(5.0f).border(1.0f, kBorderStrong)
+            .shadow(24.0f, 0.0f, 10.0f, {0.0f, 0.0f, 0.0f, 0.55f}).build();
+        ui.text("about.title").position(innerX, 18.0f)
+            .size(innerW, 24.0f).text("About ImView")
+            .color(kTextPrimary).fontSize(16.0f).build();
+        ui.text("about.version").position(innerX, 52.0f)
+            .size(innerW, 18.0f)
+            .text(std::string("Version ") + kVersion)
+            .color(kTextSecondary).fontSize(11.0f).build();
+        ui.text("about.body").position(innerX, 78.0f)
+            .size(innerW, 40.0f)
+            .text("A Windows desktop viewer for comparing images side by side. "
+                  "Zoom and pan up to four images together, and inspect regions "
+                  "numerically.")
+            .color(kTextPrimary).fontSize(11.0f).wrap(true)
+            .lineHeight(16.0f).build();
+        ui.text("about.project.label").position(innerX, 132.0f)
+            .size(innerW, 16.0f).text("PROJECT HOMEPAGE")
+            .color(kTextSecondary).fontSize(10.0f).build();
+        composeClippedText(ui, "about.project", innerX, 150.0f,
+                           innerW, 18.0f, kProjectUrl, kAccent, 11.0f);
+        ui.text("about.license").position(innerX, 182.0f)
+            .size(innerW, 16.0f)
+            .text("Released into the public domain under the Unlicense.")
+            .color(kTextSecondary).fontSize(10.5f).build();
+        composeTextButton(ui, "about.close", width - 256.0f, buttonsY,
+                          90.0f, 30.0f, "Close", false, true,
+                          [] { closeAboutDialog(); });
+        composeTextButton(ui, "about.open", width - 160.0f, buttonsY,
+                          136.0f, 30.0f, "Open project page", true, true,
+                          [] { imview::shell::openUrl(kProjectUrl); });
+    }).build();
+}
 
 void composeContextMenu(eui::Ui& ui, const eui::Screen& screen) {
     if (!state().menuOpen) return;
     const bool openMenu = state().menuKind == AppState::MenuKind::Toolbar;
     const float itemHeight = 26.0f;
     const float menuWidth = openMenu ? 196.0f : 210.0f;
-    const char* rowLabels[] = {"Add to main window", "Show in Explorer", "Open with...",
-                               "Properties"};
-    const char* openLabels[] = {"Open images...", "Open folder...", "Toggle sidebar"};
-    const char* rowHints[] = {"", "", "", ""};
-    const char* openHints[] = {"Ctrl+O", "Ctrl+Shift+O", "Ctrl+B"};
+    const char* rowLabels[] = {"Open", "Add to main window", "Show in Explorer",
+                               "Open with...", "Properties"};
+    const char* openLabels[] = {"Open images...", "Open folder...", "Toggle sidebar",
+                                "About"};
+    const char* rowHints[] = {"", "", "", "", ""};
+    const char* openHints[] = {"Ctrl+O", "Ctrl+Shift+O", "Ctrl+B", ""};
     const char* const* labels = openMenu ? openLabels : rowLabels;
     const char* const* hints = openMenu ? openHints : rowHints;
-    const int itemCount = openMenu ? 3 : 4;
+    const int itemCount = openMenu ? 4 : 5;
     const float menuHeight = itemHeight * static_cast<float>(itemCount) + 8.0f;
     const float x = std::clamp(state().menuX, 8.0f, std::max(8.0f, screen.width - menuWidth - 8.0f));
     const float y = std::clamp(state().menuY, 8.0f, std::max(8.0f, screen.height - menuHeight - 8.0f));
@@ -1998,6 +2334,7 @@ void composeContextMenu(eui::Ui& ui, const eui::Screen& screen) {
                                 case 2:
                                     state().sidebarVisible = !state().sidebarVisible;
                                     break;
+                                case 3: openAboutDialog(); break;
                                 default: break;
                             }
                             app::requestUpdate();
@@ -2015,10 +2352,11 @@ void composeContextMenu(eui::Ui& ui, const eui::Screen& screen) {
                         }
                         const std::string path = pane.paths[static_cast<std::size_t>(index)];
                         switch (item) {
-                            case 0: addSelectionToGrid(); break;
-                            case 1: imview::shell::showInExplorer(path); break;
-                            case 2: imview::shell::openWith(path); break;
-                            case 3: imview::shell::showProperties(path); break;
+                            case 0: openSingleInGrid(paneIndex, index); break;
+                            case 1: addSelectionToGrid(); break;
+                            case 2: imview::shell::showInExplorer(path); break;
+                            case 3: imview::shell::openWith(path); break;
+                            case 4: imview::shell::showProperties(path); break;
                             default: break;
                         }
                         app::requestUpdate();
@@ -2288,6 +2626,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
             composeSidebar(ui, screen);
             composeToolbar(ui, screen);
             composeContextMenu(ui, screen);
+            composeAboutDialog(ui, screen);
         }).build();
 }
 
@@ -2297,16 +2636,34 @@ const DslAppConfig& dslAppConfig() {
         .pageId("imview")
         .clearColor(kBackground)
         .windowSize(1000, 700)
+        .centerWindow()
         .minWindowSize(640, 420)
         .decorated(false)  // borderless: ImView draws its own title bar
         .fps(120.0)
         .onStart([] {
-            // 36px title bar; the left 70px holds the Open menu button and the
+            // 36px title bar; the left 80px holds the ImView menu button and the
             // right 260px holds the toggles and window buttons.
-            imview::frame::installBorderlessWindow(kToolbarHeight, 70.0f, 260.0f);
+            installImageSampler();
+            imview::frame::installBorderlessWindow(kToolbarHeight, 80.0f, 260.0f);
+            imview::frame::centerWindow();
             addPaths(launchArgs());
         })
+        .onShutdown([] {
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+            shutdownImageSampler();
+            // GpuSource destructors may run after the GPU device is destroyed;
+            // skip their GL cleanup and let the process release the textures.
+            gGpuResourcesAlive = false;
+#endif
+        })
         .onKeyEvent([](const eui::KeyEvent& event) {
+            if (state().aboutOpen) {
+                if (event.action == eui::KeyAction::Press &&
+                    event.key == eui::InputKey::Escape) {
+                    closeAboutDialog();
+                }
+                return;
+            }
             if (event.action == eui::KeyAction::Press) {
                 if (soloActive()) {
                     // In solo mode the digits are a compare pad: hold one to

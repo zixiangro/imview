@@ -13,19 +13,23 @@ preview; the shipped artifact is a single self-contained `imview.exe`.
 - **Grid** — one to four images, auto-scaled to fit their cells.
 - **Zoom and pan** — the wheel zooms every image together; left-drag pans all of
   them, right-drag pans one. Panning never reveals empty space inside a cell.
+  Zoomed pixels use nearest-neighbour sampling so their values stay exact.
 - **Per-cell work** — rotate with `1`–`4`; each cell has a `✕` button to remove
   it and a four-way handle to drag it onto another cell and swap the two.
 - **Solo view** — double-click a cell to see it full size; hold `1`–`4` to peek at
   another image on top of it.
 - **Two-image compare** — hold `Q` to paint the right image over the left cell.
 - **Local mode** — drag a rectangle and read the average `Luma`, `R/G`, `B/G`,
-  `Sat`, `R`, `G`, `B` of that region on every image.
+  `Sat`, `R`, `G`, `B` of that region on every image. A single click measures
+  exactly one pixel.
 - **EXIF and histogram** — per-image overlays, toggled from the toolbar.
-- **Folder sidebar** — one or two folders, a dot marking the files already in
-  the grid, multi-select with `Ctrl`, and a row menu with *Add to main window*,
+- **Folder sidebar** — one or two folders (the folder picker accepts multiple
+  selections), a dot marking the files already in the grid, multi-select with
+  `Ctrl`, and a row menu with *Open*, *Add to main window*,
   *Show in Explorer*, *Open with...* and *Properties*.
 - **Review mode** — with two folders open, step through them as pairs (`Space`
   next, `B` previous) with editing commands disabled.
+- **About dialog** — version, project link and licence from the `ImView` menu.
 
 EXIF can be taken over by an optional helper tool: if `imexif.exe`, `imexif.bat`
 or `imexif.cmd` sits next to `imview.exe` (or in the working directory), it is

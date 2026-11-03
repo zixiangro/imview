@@ -2,7 +2,7 @@
 
 ## Images
 
-- Opened from the `Open` menu or from the command line (file paths).
+- Opened from the `ImView` menu or from the command line (file paths).
 - At most **four** images are shown at once; extra paths are ignored.
 - Supported formats: `.png` `.jpg` `.jpeg` `.bmp` `.gif`.
 - Files are decoded on a worker thread; a cell shows `Loading...` until ready and
@@ -21,6 +21,8 @@
 
 - The mouse wheel over any cell zooms **all** images by the same factor.
 - Zoom is clamped to the range 1x (fully fitted) to 128x.
+- Above 1x, images are sampled with nearest-neighbour filtering, so magnified
+  source pixels keep their exact colour instead of being blended.
 - Left-drag pans all images; right-drag pans only the cell under the pointer.
 - Panning is clamped: an image never shows empty space inside its cell.
 - Combined panning stops at the limit of each image independently, so pushing
@@ -58,10 +60,11 @@
 - `P` toggles local mode.
 - Left-drag draws one selection rectangle that appears at the same relative
   position on every image; the rectangle is blue while dragging and red once
-  released.
+  released. A click without dragging is a one-pixel ROI.
 - On release each image shows four lines at its bottom-left corner with the
   average colour of the selected region:
-  `Luma`, `R/G` and `B/G`, `Sat`, and `R` `G` `B` (two decimals).
+  `Luma`, `R/G` and `B/G`, `Sat`, and `R` `G` `B` (two decimals). For a
+  one-pixel ROI the values are exactly that pixel's values.
 - Right-drag moves the selection of the image under the pointer only.
 - While local mode is active the wheel does not zoom and dragging does not pan.
 - Rotating an image, closing it, or leaving local mode clears the selections.
@@ -85,8 +88,9 @@
 
 ## Folder sidebar
 
-- Opened from the `Open` menu (`Open folder...`); up to **two** folders can be
-  open at once, shown as vertically equal panes.
+- Opened from the `ImView` menu (`Open folder...`); up to **two** folders can be
+  open at once, shown as vertically equal panes. The folder picker accepts a
+  multi-selection; selected folders fill the panes from the first one.
 - Opened images hide the sidebar; opening a folder shows it again.
 - Only the first level of a folder is listed, images only, sorted by file name
   (case-insensitive).
@@ -106,7 +110,7 @@
 |---|---|
 | Double click | Clears the grid and shows that image |
 | Right click | Opens the row menu (see below) |
-| `+` in pane header | Opens a second folder (shown while one pane exists) |
+| `+` in pane header | Opens the folder picker (shown while one pane exists) |
 | `...` in pane header | Replaces that pane's folder |
 | `x` in pane header | Closes that pane |
 
@@ -114,6 +118,7 @@ Row menu:
 
 | Item | Result |
 |---|---|
+| Open | Replaces the grid with the clicked image |
 | Add to main window | Adds the selected rows, at most four in total |
 | Show in Explorer | Opens Explorer with the file selected |
 | Open with... | Opens the system "Open with" chooser |
@@ -144,6 +149,11 @@ Entered with the toolbar `R` chip; requires exactly two folders.
 - The window is borderless; the title bar is drawn by the application.
 - Dragging the empty part moves the window natively (Aero Snap, double-click to
   maximise).
-- Left: the `Open` menu. Centre: a status indicator. Right: mode chips and
+- Left: the `ImView` menu. Centre: a status indicator. Right: mode chips and
   window buttons.
+- The `ImView` menu holds `Open images...`, `Open folder...`, `Toggle sidebar`
+  and `About`.
+- `About` opens a centred dialog with the version, a short description, the
+  project homepage link and the licence. It has `Close` and
+  `Open project page` buttons.
 - The window can be resized from its edges and corners.

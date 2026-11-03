@@ -28,6 +28,9 @@ void toggleMaximizeWindow();
 void closeWindow();
 bool isMaximized();
 
+// Centres the window on the work area of the monitor it currently belongs to.
+void centerWindow();
+
 // Enables/disables the native title-bar drag band. While an in-app menu is
 // open, dragging must be suppressed so clicks reach the UI and dismiss it.
 void setTitleBarDragEnabled(bool enabled);

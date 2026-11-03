@@ -8,6 +8,7 @@ coordinates below are logical units (96 dpi); the UI scales with the monitor DPI
 | Property | Value |
 |---|---|
 | Initial size | 1000 x 700 |
+| Initial position | centred on the monitor work area |
 | Minimum size | 640 x 420 |
 | Frame source | `src/window_frame.cpp` (Win32) |
 
@@ -15,13 +16,13 @@ coordinates below are logical units (96 dpi); the UI scales with the monitor DPI
 
 ```
 ┌────────┬──────────────────────────────────┬───────────────────────────────┐
-│  Open  │      2 / 4 · EXIF · 150%         │  [E][H][P] [R]  │  −  □  ✕    │
+│ ImView │      2 / 4 · EXIF · 150%         │  [E][H][P] [R]  │  −  □  ✕    │
 └────────┴──────────────────────────────────┴───────────────────────────────┘
 ```
 
 | Element | Position | Notes |
 |---|---|---|
-| `Open` menu button | x = 8, w = 58 | Dropdown: Open images…, Open folder…, Toggle sidebar |
+| `ImView` menu button | x = 8, w = 66 | Dropdown: Open images…, Open folder…, Toggle sidebar, About |
 | Status text | centred, 340 wide | Empty when nothing is shown |
 | Mode chips | right of centre | 24x24 each; `E`, `H`, `P`, `R` |
 | Window buttons | right edge | 36 wide, full bar height |
@@ -85,11 +86,22 @@ rectangles rather than text so they stay crisp at any DPI.
 
 | Property | Value |
 |---|---|
-| Width | 196 for the toolbar `Open` menu, 210 for row menus |
+| Width | 196 for the toolbar `ImView` menu, 210 for row menus |
 | Item height | 26, with 4 px padding around the panel |
+| Items | Toolbar: four items. A row: `Open`, `Add to main window`, `Show in Explorer`, `Open with...`, `Properties` |
 | Item hint | right-aligned 11 px text (`Ctrl+O`, `Ctrl+Shift+O`, `Ctrl+B`) |
 | Disabled item | secondary label colour, no hover state, not clickable |
 | Backdrop | full-window transparent surface that closes the menu; it also stops the title bar from acting as a drag band |
+
+## About dialog
+
+| Property | Value |
+|---|---|
+| Size | 480 x 300, clamped to the window with a 16 px margin |
+| Position | centred in the window |
+| Backdrop | full-window 55% black surface |
+| Contents | title, version, description, project homepage, licence |
+| Buttons | `Close` (secondary) and `Open project page` (primary) |
 
 ## Colours
 

@@ -5,7 +5,7 @@
 | Input | Condition | Action |
 |---|---|---|
 | `Ctrl+O` | Not in review mode | Open the images dialog |
-| `Ctrl+Shift+O` | Not in review mode | Open the folder dialog (replaces the second pane) |
+| `Ctrl+Shift+O` | Not in review mode | Open the folder dialog (multi-selection; a single folder replaces the second pane) |
 | `Ctrl+B` | — | Show or hide the sidebar |
 | `Esc` | — | Cancel a pending move, else close the menu, else leave solo view |
 
@@ -53,6 +53,7 @@ unavailable while review mode is on.
 | Input | Action |
 |---|---|
 | Left drag | Draw the same relative selection on every image and recompute statistics |
+| Left click | Select one pixel and compute its statistics |
 | Right drag | Move the selection of the cell under the pointer only |
 | Mouse wheel | Disabled while local mode is on |
 
@@ -63,7 +64,7 @@ unavailable while review mode is on.
 | Single click | Select one row |
 | `Ctrl` + click | Toggle a row in the selection (both panes) |
 | Double click | Clear the grid and show that image (in review mode: show the pair) |
-| Right click | Row menu |
+| Right click | Row menu: `Open`, `Add to main window`, `Show in Explorer`, `Open with...`, `Properties` |
 | Mouse wheel | Scroll that pane (both panes together in review mode) |
 | Drag scrollbar | Scroll that pane |
 

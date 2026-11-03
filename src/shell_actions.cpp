@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -157,25 +158,23 @@ std::string findExifHelper() {
     return {};
 }
 
-#endif
-
-} // namespace
-
-std::string pickFolder(const std::string& initialDirectory) {
-#if defined(_WIN32)
-    // IFileOpenDialog with FOS_PICKFOLDERS gives the modern picker; the old
-    // SHBrowseForFolder dialog is kept as a fallback.
+// IFileOpenDialog with FOS_PICKFOLDERS gives the modern folder picker. The old
+// SHBrowseForFolder dialog is kept as a single-folder fallback.
+std::vector<std::string> chooseFolders(const std::string& initialDirectory,
+                                       bool allowMultiple) {
     const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-    std::string result;
+    std::vector<std::string> result;
     IFileOpenDialog* dialog = nullptr;
     if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
                                    IID_PPV_ARGS(&dialog)))) {
         DWORD options = 0;
         if (SUCCEEDED(dialog->GetOptions(&options))) {
-            dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+            options |= FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+            if (allowMultiple) options |= FOS_ALLOWMULTISELECT;
+            dialog->SetOptions(options);
         }
-        dialog->SetTitle(L"Choose a folder");
+        dialog->SetTitle(allowMultiple ? L"Choose folders" : L"Choose a folder");
 
         IShellItem* initial = nullptr;
         const std::wstring wideInitial = imview::utf8::widen(initialDirectory);
@@ -188,26 +187,38 @@ std::string pickFolder(const std::string& initialDirectory) {
         }
 
         if (SUCCEEDED(dialog->Show(nullptr))) {
-            IShellItem* item = nullptr;
-            if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr) {
-                PWSTR filePath = nullptr;
-                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &filePath))) {
-                    result = imview::utf8::narrow(filePath);
-                    CoTaskMemFree(filePath);
+            IShellItemArray* results = nullptr;
+            if (SUCCEEDED(dialog->GetResults(&results)) && results != nullptr) {
+                DWORD count = 0;
+                if (SUCCEEDED(results->GetCount(&count))) {
+                    for (DWORD index = 0; index < count; ++index) {
+                        IShellItem* item = nullptr;
+                        if (FAILED(results->GetItemAt(index, &item)) || item == nullptr) {
+                            continue;
+                        }
+                        PWSTR filePath = nullptr;
+                        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &filePath))) {
+                            std::string path = imview::utf8::narrow(filePath);
+                            if (!path.empty()) result.push_back(std::move(path));
+                            CoTaskMemFree(filePath);
+                        }
+                        item->Release();
+                    }
                 }
-                item->Release();
+                results->Release();
             }
         }
         dialog->Release();
     } else {
         BROWSEINFOW browse{};
-        browse.lpszTitle = L"Choose a folder";
+        browse.lpszTitle = allowMultiple ? L"Choose folders" : L"Choose a folder";
         browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
         LPITEMIDLIST idList = SHBrowseForFolderW(&browse);
         if (idList != nullptr) {
             wchar_t filePath[MAX_PATH]{};
             if (SHGetPathFromIDListW(idList, filePath)) {
-                result = imview::utf8::narrow(filePath);
+                std::string path = imview::utf8::narrow(filePath);
+                if (!path.empty()) result.push_back(std::move(path));
             }
             CoTaskMemFree(idList);
         }
@@ -217,9 +228,33 @@ std::string pickFolder(const std::string& initialDirectory) {
         CoUninitialize();
     }
     return result;
-#else
-    (void)initialDirectory;
+}
+
+#endif
+
+#if !defined(_WIN32)
+std::vector<std::string> chooseFolders(const std::string&, bool) {
     return {};
+}
+#endif
+
+} // namespace
+
+std::string pickFolder(const std::string& initialDirectory) {
+    const std::vector<std::string> folders = chooseFolders(initialDirectory, false);
+    return folders.empty() ? std::string() : folders.front();
+}
+
+std::vector<std::string> pickFolders(const std::string& initialDirectory) {
+    return chooseFolders(initialDirectory, true);
+}
+
+bool openUrl(const std::string& url) {
+#if defined(_WIN32)
+    return invokeVerb(url, L"open", SEE_MASK_FLAG_NO_UI);
+#else
+    (void)url;
+    return false;
 #endif
 }
 

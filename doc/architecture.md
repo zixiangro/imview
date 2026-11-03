@@ -10,7 +10,7 @@ code lives in `src/`; EUI-NEO is used only through its public headers.
 | `src/app.cpp` | Application state, decoding pipeline, sidebar, review mode, and all UI composition |
 | `src/stb_wrap.cpp` / `.h` | Image decoding with stb_image over a memory-mapped file |
 | `src/exif.cpp` / `.h` | EXIF reader for JPEG (APP1) and PNG (`eXIf`); walks the container with seeks, so image data is never read |
-| `src/shell_actions.cpp` / `.h` | Native folder picker, "show in Explorer", "open with", "properties" |
+| `src/shell_actions.cpp` / `.h` | Native file/folder pickers, URL/file opening, "show in Explorer", "open with", "properties" |
 | `src/window_frame.cpp` / `.h` | Borderless Win32 window: custom frame, native drag/resize, window buttons, DPI scale |
 | `src/utf8.h` | UTF-8/UTF-16 conversion, shared by the app and the shell actions |
 | `tests/tests.cpp` | Logic tests: UTF-8, EXIF, decoding |
@@ -37,16 +37,23 @@ queue), so the worker never touches `state()`.
 Decoded pixels are handed to the UI thread through `std::shared_ptr` payloads, so
 no pixel buffer is copied on the UI thread.
 
-Each loaded image owns **two** `eui::ImageStream` mailboxes holding the same
-frame. A stream yields its frame once, and the renderer needs a second copy when
-an image is painted in another cell (the `Q` comparison) or after a mode switch.
+Each loaded image owns a GPU texture created by the application and exposed to
+EUI as an external `GpuImage`. The application substitutes a shared sampler for
+EUI's external-image sampler so the filter follows the zoom state: linear while
+fitted, nearest while the view is magnified so source pixels stay unblended. The
+two `ImageStream` mailboxes remain as the fallback for backends or devices that
+reject the external image; each stream yields its frame once, so a second copy
+exists for the `Q` comparison and mode switches.
+
+`app.cpp` wraps the OpenGL sampler binding for external images and swaps in a
+shared sampler whose filter follows the zoom state.
 
 ## State model
 
 ```
 AppState
 ├─ images      grid cells, in display order
-│   └─ ImageEntry: path, decoded pixels, stream, altStream,
+│   └─ ImageEntry: path, decoded pixels, stream, altStream, gpuImage,
 │                  zoom/pan (clamped), rotation, selection + statistics,
 │                  histogram, EXIF, cached overlay text (exifLines, statsLines)
 ├─ zoom / qSwapActive / move source+target
@@ -57,7 +64,8 @@ AppState
 ├─ selected[]                (pane, index) pairs, shared across panes
 ├─ reviewMode, reviewIndex
 ├─ cellClick, rowClick       double-click trackers
-└─ menuOpen, menuKind, menuX/Y, menuPane, menuIndex
+├─ menuOpen, menuKind, menuX/Y, menuPane, menuIndex
+└─ aboutOpen
 ```
 
 Rendering is a pure function of this state: `compose()` rebuilds the element
@@ -66,7 +74,7 @@ tree every frame, and `requestUpdate()` schedules the next frame.
 ## Data flow
 
 ```
-Open menu / sidebar double click / command line
+ImView menu / sidebar double click / command line
         │
         ▼
    addPaths(paths) ─────────────► startLoad(path)
@@ -75,9 +83,11 @@ Open menu / sidebar double click / command line
         │                        decodeRgba (worker)
         │                              │ shared_ptr pixels
         │                              ▼
-        │                        ImageEntry + submit frame to both streams
+        │                        ImageEntry (pixels; first compose uploads
+        │                        the external texture, streams stay as fallback)
         ▼
-   compose() → composeGrid / composeSidebar / composeToolbar / composeContextMenu
+   compose() → composeGrid / composeSidebar / composeToolbar /
+               composeContextMenu / composeAboutDialog
 ```
 
 Review mode drives the same path: `openReviewPair(n)` clears the grid and calls
@@ -100,15 +110,19 @@ Review mode drives the same path: `openReviewPair(n)` clears the grid and calls
 
 | Message | Purpose |
 |---|---|
-| `WM_NCCALCSIZE` | Return 0 so the frame style produces no visible frame |
+| `WM_NCCALCSIZE` | Force the client area to the full window rect so the frame style produces no visible frame |
 | `WM_NCHITTEST` | Edge bands become resize borders; the title band becomes `HTCAPTION` |
 | `WM_NCLBUTTONDBLCLK` | Maximise/restore using the app's own maximise |
 | `WM_SIZE` | Convert a system maximise into the app's own geometry |
 | `WM_ENTERSIZEMOVE` | Restore a maximised window before dragging |
+| `DwmSetWindowAttribute` | Square corners and no native border line while maximised |
+| `SetWindowRgn` | Full-window region while maximised, so DWM cannot reveal the desktop at rounded corners |
 
 Maximising resizes to the monitor work area rather than entering the native
 zoomed state, because a zoomed window forces a frame-inflated rect that
-`SetWindowPos` cannot correct.
+`SetWindowPos` cannot correct. DWM corner and border attributes are switched to
+square, borderless values while maximised, and a full-window region removes the
+last rounded-corner gap so the custom frame reaches all four window edges.
 
 ## Dependencies
 
