@@ -86,6 +86,7 @@ const eui::Color kWindowCloseHover{0.769f, 0.169f, 0.110f, 1.0f}; // #C42B1C
 
 constexpr float kToolbarHeight = 36.0f;
 constexpr float kRadius = 4.0f;
+constexpr float kCellBorderWidth = 1.0f;
 
 constexpr const char* kVersion = IMVIEW_VERSION;
 constexpr const char* kProjectUrl = IMVIEW_HOMEPAGE;
@@ -289,6 +290,28 @@ AppState& state() {
     return instance;
 }
 
+// Hairlines are snapped to the physical pixel grid so they stay one device
+// pixel wide instead of blurring across two.
+float pixelScale() {
+    const float scale = imview::frame::dpiScale();
+    return scale > 0.0f ? scale : 1.0f;
+}
+
+float snapToPixel(float value) {
+    const float scale = pixelScale();
+    return std::round(value * scale) / scale;
+}
+
+float floorToPixel(float value) {
+    const float scale = pixelScale();
+    return std::floor(value * scale) / scale;
+}
+
+float crispLine(float width) {
+    const float scale = pixelScale();
+    return std::max(std::floor(width * scale), 1.0f) / scale;
+}
+
 // The sidebar keeps a usable main area for narrow windows; the stored width is
 // the user's preference and is clamped to the current window each compose.
 float clampSidebarWidth(float width, float screenWidth) {
@@ -297,7 +320,7 @@ float clampSidebarWidth(float width, float screenWidth) {
 }
 
 float sidebarWidthFor(float screenWidth) {
-    return clampSidebarWidth(state().sidebarWidth, screenWidth);
+    return snapToPixel(clampSidebarWidth(state().sidebarWidth, screenWidth));
 }
 
 // The popup menu and the About dialog swallow clicks, so the title bar must
@@ -1683,13 +1706,16 @@ void composeWindowButton(eui::Ui& ui, const std::string& id, float x, float y,
         const eui::Color ink = kTextSecondary;
         const float centerX = width * 0.5f;
         const float centerY = height * 0.5f;
+        const float glyphLine = crispLine(1.0f);
         if (glyph == 0) {
-            ui.rect(id + ".g").position(centerX - 5.0f, centerY)
-                .size(10.0f, 1.0f).color(ink).build();
+            ui.rect(id + ".g")
+                .position(snapToPixel(centerX - 5.0f), snapToPixel(centerY))
+                .size(10.0f, glyphLine).color(ink).build();
         } else if (glyph == 1) {
-            ui.rect(id + ".g").position(centerX - 4.5f, centerY - 4.5f)
+            ui.rect(id + ".g")
+                .position(snapToPixel(centerX - 4.5f), snapToPixel(centerY - 4.5f))
                 .size(9.0f, 9.0f).color({0.0f, 0.0f, 0.0f, 0.0f})
-                .border(1.0f, ink).build();
+                .border(glyphLine, ink).build();
         } else {
             // Match the visual weight of the 11px square / 13px bar. After the
             // 45° rotation the ink box is about (length + thickness) / sqrt(2).
@@ -1752,8 +1778,9 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
         .zIndex(100).content([&] {
         ui.rect("toolbar.bg").size(screen.width, kToolbarHeight)
             .color(kToolbarBackground).build();
-        ui.rect("toolbar.line").position(0.0f, kToolbarHeight - 1.0f)
-            .size(screen.width, 1.0f).color(kToolbarLine).build();
+        const float lineWidth = crispLine(1.0f);
+        ui.rect("toolbar.line").position(0.0f, kToolbarHeight - lineWidth)
+            .size(screen.width, lineWidth).color(kToolbarLine).build();
 
         // The empty part of the toolbar doubles as the title bar and is handled
         // natively via WM_NCHITTEST -> HTCAPTION (window_frame.cpp); nothing to
@@ -2177,14 +2204,21 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
     entry.cellY = y;
     entry.cellW = width;
     entry.cellH = height;
-    panLimits(entry, width, height, entry.maxPanX, entry.maxPanY);
+    const float border = crispLine(kCellBorderWidth);
+    const float innerX = border;
+    const float innerY = border;
+    const float innerWidth = std::max(1.0f, width - 2.0f * border);
+    const float innerHeight = std::max(1.0f, height - 2.0f * border);
+    panLimits(entry, innerWidth, innerHeight, entry.maxPanX, entry.maxPanY);
     entry.panX = std::clamp(entry.panX, -entry.maxPanX, entry.maxPanX);
     entry.panY = std::clamp(entry.panY, -entry.maxPanY, entry.maxPanY);
 
     float offsetX = 0.0f;
     float offsetY = 0.0f;
-    displayOffset(entry, width, height, offsetX, offsetY);
-    const DisplayRect shown = displayRect(entry, width, height);
+    displayOffset(entry, innerWidth, innerHeight, offsetX, offsetY);
+    DisplayRect shown = displayRect(entry, innerWidth, innerHeight);
+    shown.x += innerX;
+    shown.y += innerY;
     const bool localMode = state().localMode;
     const int entryId = entry.id;
     // Move mode: the armed cell gets an accent frame, the hovered target a tint.
@@ -2219,10 +2253,11 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
     ui.stack(id).position(x, y).size(width, height).clip().content([&] {
         // Flat surface with a hairline border, like a VS Code editor group.
         ui.rect(id + ".bg").size(width, height).color(kPanel)
-            .border(1.0f, kBorder)
+            .border(border, kBorder)
             .build();
         auto image = ui.image(id + ".img");
-        image.size(width, height)
+        image.position(innerX, innerY)
+            .size(innerWidth, innerHeight)
             .fit(eui::ImageFit::Contain)
             .transformOrigin(0.5f, 0.5f)
             .scale(zoom, zoom)
@@ -2238,7 +2273,7 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
             ui.rect(id + ".move.frame").size(width, height)
                 .color(moveTarget ? eui::Color{0.0f, 0.471f, 0.831f, 0.18f}
                                   : eui::Color{0.0f, 0.0f, 0.0f, 0.0f})
-                .border(2.0f, kAccent).build();
+                .border(crispLine(2.0f), kAccent).build();
         }
         if (entry.loading) {
             ui.text(id + ".status").size(width, height).text("Loading...")
@@ -2271,12 +2306,16 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
         }
         if (drawSelection) {
             // A one-pixel ROI still needs a visible marker.
-            const float selectionWidth = std::max((sx1 - sx0) * shown.w, 1.0f);
-            const float selectionHeight = std::max((sy1 - sy0) * shown.h, 1.0f);
-            ui.rect(id + ".sel").position(shown.x + sx0 * shown.w, shown.y + sy0 * shown.h)
+            const float selectionWidth =
+                std::max(snapToPixel((sx1 - sx0) * shown.w), 1.0f);
+            const float selectionHeight =
+                std::max(snapToPixel((sy1 - sy0) * shown.h), 1.0f);
+            ui.rect(id + ".sel")
+                .position(snapToPixel(shown.x + sx0 * shown.w),
+                          snapToPixel(shown.y + sy0 * shown.h))
                 .size(selectionWidth, selectionHeight)
                 .color({0.0f, 0.0f, 0.0f, 0.0f})
-                .border(1.5f, dragging ? kSelectionDrag : kSelectionFixed)
+                .border(crispLine(1.5f), dragging ? kSelectionDrag : kSelectionFixed)
                 .build();
         }
 
@@ -2326,13 +2365,13 @@ void composeCellKeepAlive(eui::Ui& ui, ImageEntry& entry) {
 }
 
 void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
-    const float margin = 12.0f;
-    const float gap = 8.0f;
+    const float margin = 3.0f;
+    const float gap = 2.0f;
     const int count = static_cast<int>(state().images.size());
     const float top = kToolbarHeight;
     const float left = state().sidebarVisible ? sidebarWidthFor(screen.width) : 0.0f;
-    const float availableWidth = screen.width - left - margin * 2.0f;
-    const float availableHeight = screen.height - top - margin * 2.0f;
+    const float availableWidth = floorToPixel(screen.width - left - margin * 2.0f);
+    const float availableHeight = floorToPixel(screen.height - top - margin * 2.0f);
 
     // Solo mode: the current (or peeked) image fills the whole grid area.
     if (soloActive()) {
@@ -2344,18 +2383,18 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
                     composeCellKeepAlive(ui, entry);
                 }
             }
-            composeCell(ui, *shown, left + margin, top + margin,
-                        availableWidth, availableHeight);
+            composeCell(ui, *shown, snapToPixel(left + margin),
+                        snapToPixel(top + margin), availableWidth, availableHeight);
             return;
         }
     }
 
     const int cols = count == 1 ? 1 : 2;
     const int rows = (count + cols - 1) / cols;
-    const float cellWidth = (availableWidth - gap * (cols - 1)) / cols;
-    const float cellHeight = (availableHeight - gap * (rows - 1)) / rows;
+    const float cellWidth = floorToPixel((availableWidth - gap * (cols - 1)) / cols);
+    const float cellHeight = floorToPixel((availableHeight - gap * (rows - 1)) / rows);
     const float totalHeight = rows * cellHeight + (rows - 1) * gap;
-    const float y0 = top + margin + (availableHeight - totalHeight) * 0.5f;
+    const float y0 = snapToPixel(top + margin + (availableHeight - totalHeight) * 0.5f);
 
     // Q cover: the right image is painted in the left cell while held.
     std::shared_ptr<eui::ImageStream> leftCover;
@@ -2370,9 +2409,9 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
         const int col = index % cols;
         const int cellsInRow = std::min(cols, count - row * cols);
         const float rowWidth = cellsInRow * cellWidth + (cellsInRow - 1) * gap;
-        const float x = left + margin + (availableWidth - rowWidth) * 0.5f +
-                        col * (cellWidth + gap);
-        const float y = y0 + row * (cellHeight + gap);
+        const float x = snapToPixel(left + margin + (availableWidth - rowWidth) * 0.5f +
+                                    col * (cellWidth + gap));
+        const float y = snapToPixel(y0 + row * (cellHeight + gap));
         composeCell(ui, state().images[static_cast<std::size_t>(index)],
                     x, y, cellWidth, cellHeight,
                     index == 0 ? leftCover : nullptr,
@@ -2387,8 +2426,8 @@ void composeAboutDialog(eui::Ui& ui, const eui::Screen& screen) {
 
     const float width = std::min(480.0f, screen.width - 32.0f);
     const float height = std::min(300.0f, screen.height - 32.0f);
-    const float x = (screen.width - width) * 0.5f;
-    const float y = (screen.height - height) * 0.5f;
+    const float x = snapToPixel((screen.width - width) * 0.5f);
+    const float y = snapToPixel((screen.height - height) * 0.5f);
     const float innerX = 24.0f;
     const float innerW = width - 48.0f;
     const float buttonsY = height - 48.0f;
@@ -2400,7 +2439,7 @@ void composeAboutDialog(eui::Ui& ui, const eui::Screen& screen) {
         .build();
     ui.stack("about").position(x, y).size(width, height).zIndex(501).content([&] {
         ui.rect("about.bg").size(width, height).color(kPanel)
-            .radius(5.0f).border(1.0f, kBorderStrong)
+            .radius(5.0f).border(crispLine(1.0f), kBorderStrong)
             .shadow(24.0f, 0.0f, 10.0f, {0.0f, 0.0f, 0.0f, 0.55f}).build();
         ui.text("about.title").position(innerX, 18.0f)
             .size(innerW, 24.0f).text("About ImView")
@@ -2449,8 +2488,10 @@ void composeContextMenu(eui::Ui& ui, const eui::Screen& screen) {
     const char* const* hints = openMenu ? openHints : rowHints;
     const int itemCount = openMenu ? 4 : 5;
     const float menuHeight = itemHeight * static_cast<float>(itemCount) + 8.0f;
-    const float x = std::clamp(state().menuX, 8.0f, std::max(8.0f, screen.width - menuWidth - 8.0f));
-    const float y = std::clamp(state().menuY, 8.0f, std::max(8.0f, screen.height - menuHeight - 8.0f));
+    const float x = snapToPixel(
+        std::clamp(state().menuX, 8.0f, std::max(8.0f, screen.width - menuWidth - 8.0f)));
+    const float y = snapToPixel(
+        std::clamp(state().menuY, 8.0f, std::max(8.0f, screen.height - menuHeight - 8.0f)));
 
     // Click-anywhere backdrop dismisses the menu; added before the panel so the
     // items stay clickable.
@@ -2464,7 +2505,7 @@ void composeContextMenu(eui::Ui& ui, const eui::Screen& screen) {
     ui.stack("menu").position(x, y).size(menuWidth, menuHeight).zIndex(400).content([&] {
         ui.rect("menu.bg").size(menuWidth, menuHeight)
             .color({0.157f, 0.157f, 0.157f, 1.0f}).radius(5.0f)
-            .border(1.0f, kBorderStrong)
+            .border(crispLine(1.0f), kBorderStrong)
             .shadow(16.0f, 0.0f, 6.0f, {0.0f, 0.0f, 0.0f, 0.5f}).build();
         const int index = state().menuIndex;
         const int paneIndex = state().menuPane;
@@ -2680,6 +2721,7 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
     const float totalHeight = screen.height - top;
     const float width = sidebarWidthFor(screen.width);
     state().sidebarWidth = width;
+    const float lineWidth = crispLine(1.0f);
     const int paneCount = static_cast<int>(state().folders.size());
     const int visiblePanes = std::max(1, paneCount);
     const float paneHeight = totalHeight / static_cast<float>(visiblePanes);
@@ -2687,8 +2729,8 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
         .zIndex(60).content([&] {
         ui.rect("sidebar.bg").size(width, totalHeight)
             .color({0.094f, 0.094f, 0.094f, 1.0f}).build();
-        ui.rect("sidebar.edge").position(width - 1.0f, 0.0f)
-            .size(1.0f, totalHeight).color(kBorder).build();
+        ui.rect("sidebar.edge").position(width - lineWidth, 0.0f)
+            .size(lineWidth, totalHeight).color(kBorder).build();
 
         if (paneCount == 0) {
             return;
@@ -2698,10 +2740,10 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
             auto& pane = state().folders[static_cast<std::size_t>(paneIndex)];
             // The last pane takes the remaining space so rounding cannot make the
             // two panes differ in height.
-            const float paneTop = static_cast<float>(paneIndex) * paneHeight;
+            const float paneTop = snapToPixel(static_cast<float>(paneIndex) * paneHeight);
             const float paneBottom = paneIndex + 1 == paneCount
                 ? totalHeight
-                : static_cast<float>(paneIndex + 1) * paneHeight;
+                : snapToPixel(static_cast<float>(paneIndex + 1) * paneHeight);
             const float thisPaneHeight = paneBottom - paneTop;
             const float listTop = paneTop + kSidebarHeaderHeight;
             const float listHeight = std::max(0.0f, thisPaneHeight - kSidebarHeaderHeight);
@@ -2731,8 +2773,9 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
                                         paneTop + 4.0f, 20.0f, "x",
                                         [paneIndex] { closePane(paneIndex); });
             }
-            ui.rect(paneId + ".divider").position(0.0f, paneTop + kSidebarHeaderHeight - 1.0f)
-                .size(width, 1.0f).color(kBorder).build();
+            ui.rect(paneId + ".divider")
+                .position(0.0f, paneTop + kSidebarHeaderHeight - lineWidth)
+                .size(width, lineWidth).color(kBorder).build();
 
 
             if (count == 0) {
@@ -2780,20 +2823,21 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
             composeSidebarScrollbar(ui, paneIndex, pane, listTop, listHeight, width);
             // Divider between the two panes.
             if (paneIndex + 1 < paneCount) {
-                ui.rect(paneId + ".split").position(0.0f, paneBottom - 1.0f)
-                    .size(width, 1.0f).color(kBorder).build();
+                ui.rect(paneId + ".split").position(0.0f, paneBottom - lineWidth)
+                    .size(width, lineWidth).color(kBorder).build();
             }
         }
     }).build();
 }
 
-// Vertical grab band on the sidebar's right edge. It lives in the main area so
-// it never competes with the row and scrollbar surfaces inside the sidebar.
+// Vertical grab band centred on the sidebar's right edge: half lies inside the
+// sidebar, half in the main area.
 void composeSidebarResizeHandle(eui::Ui& ui, const eui::Screen& screen, float width) {
     const float top = kToolbarHeight;
     const float height = screen.height - top;
     const float screenWidth = screen.width;
-    ui.rect("sidebar.splitter").position(width - 1.0f, top)
+    ui.rect("sidebar.splitter")
+        .position(width - kSidebarResizeHandleWidth * 0.5f, top)
         .size(kSidebarResizeHandleWidth, height)
         .zIndex(61)
         .color({0.0f, 0.0f, 0.0f, 0.0f})
@@ -2838,11 +2882,12 @@ void composeDropHighlight(eui::Ui& ui, const eui::Screen& screen, float sidebarW
     const float frameWidth = width - kSideInset * 2.0f;
     const float frameHeight = screen.height - kSideInset - frameY;
     if (frameWidth <= 0.0f || frameHeight <= 0.0f) return;
-    ui.rect("drop.highlight").position(frameX, frameY)
-        .size(frameWidth, frameHeight)
+    ui.rect("drop.highlight")
+        .position(snapToPixel(frameX), snapToPixel(frameY))
+        .size(floorToPixel(frameWidth), floorToPixel(frameHeight))
         .zIndex(62)
         .color({0.0f, 0.0f, 0.0f, 0.0f})
-        .border(2.0f, kAccent)
+        .border(crispLine(2.0f), kAccent)
         .build();
 }
 
@@ -2854,7 +2899,7 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     const float sidebarWidth = sidebarWidthFor(screen.width);
     imview::frame::setSidebarSplitter(
         state().sidebarVisible && !state().menuOpen && !state().aboutOpen
-            ? sidebarWidth - 1.0f
+            ? sidebarWidth - kSidebarResizeHandleWidth * 0.5f
             : -1.0f);
     ui.stack("root").size(screen.width, screen.height)
         .cursor(eui::CursorShape::Arrow)

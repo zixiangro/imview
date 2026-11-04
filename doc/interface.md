@@ -2,6 +2,8 @@
 
 The window is borderless and uses a dark "VS Code Dark Modern" palette. All
 coordinates below are logical units (96 dpi); the UI scales with the monitor DPI.
+Borders and hairlines are snapped to the physical pixel grid so they stay at
+least one device pixel wide instead of blurring across two.
 
 ## Window
 
@@ -45,8 +47,8 @@ menus temporarily disable that so their clicks are not swallowed.
 
 | Property | Value |
 |---|---|
-| Outer margin | 12 |
-| Gap between cells | 8 |
+| Outer margin | 3 |
+| Gap between cells | 2 |
 | Cell border | 1 px `#2B2B2B` |
 | Cell background | `#212121` |
 
@@ -67,7 +69,7 @@ The width is adjustable from 160 px up to `window width - 320`.
 
 | Element | Value |
 |---|---|
-| Resize divider | 6 px grab band on the right edge; cursor changes to horizontal resize |
+| Resize divider | 6 px grab band centred on the right edge, 3 px on each side; cursor changes to horizontal resize |
 | Pane header | 30 px: folder name, `+` (one pane only), `...`, `x` |
 | Row height | 22 px |
 | Row text | file name, 11.5 px |
@@ -85,7 +87,7 @@ The width is adjustable from 160 px up to `window width - 320`.
 | Histogram | below the cell buttons, right | 80x48, 60% black, white bars |
 | File name | bottom, centred | 11 px secondary text over the image |
 | Local statistics | bottom-left | four 60% black strips, white 11 px text |
-| Selection rectangle | over the image | 1.5 px border, blue while dragging, red when set |
+| Selection rectangle | over the image | 1.5 px logical border, rounded to whole device pixels (1 px at 100% DPI), blue while dragging, red when set |
 | Move highlight | whole cell | armed cell: 2 px accent frame; drop target: accent frame plus 18% accent fill |
 
 The move handle is a four-way arrow drawn from 1 px bars: one shaft per axis and
