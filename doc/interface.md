@@ -50,14 +50,24 @@ menus temporarily disable that so their clicks are not swallowed.
 | Cell border | 1 px `#2B2B2B` |
 | Cell background | `#212121` |
 
-## Sidebar (240 px wide)
+## Drop feedback
+
+While a valid Explorer drag hovers over the window, a 2 px accent frame marks
+the destination: the main area for image files, or the sidebar for folders. The
+frame is inset 1 px from the toolbar boundary and 2 px from the other three
+edges.
+
+
+## Sidebar (240 px wide by default)
 
 Shown while the sidebar is visible: opening a folder brings it up, opening
 images hides it, and `Ctrl`+`B` toggles it. With no folder open it is an empty
 panel. One or two panes, each `(window height - title bar) / pane count` tall.
+The width is adjustable from 160 px up to `window width - 320`.
 
 | Element | Value |
 |---|---|
+| Resize divider | 6 px grab band on the right edge; cursor changes to horizontal resize |
 | Pane header | 30 px: folder name, `+` (one pane only), `...`, `x` |
 | Row height | 22 px |
 | Row text | file name, 11.5 px |

@@ -2,7 +2,8 @@
 
 ## Images
 
-- Opened from the `ImView` menu or from the command line (file paths).
+- Opened from the `ImView` menu, from the command line (file paths), or by
+  dropping files from Explorer.
 - At most **four** images are shown at once; extra paths are ignored.
 - Supported formats: `.png` `.jpg` `.jpeg` `.bmp` `.gif`.
 - Files are decoded on a worker thread; a cell shows `Loading...` until ready and
@@ -16,6 +17,20 @@
 - Every cell has the same size; rows are horizontally centred.
 - Images are scaled to fit their cell without cropping or distortion (1x zoom =
   fully visible). The remaining space is left empty.
+
+## Drag and drop
+
+- Image files dropped on the main area are added to the grid: existing cells
+  stay, duplicates are ignored and the four-image cap applies. The sidebar keeps
+  its current visibility.
+- Folders dropped on the sidebar fill free panes. One or two folders can be
+  dropped at once; with both panes occupied the sidebar is not a drop target.
+- A drop that contains both files and folders is filtered by destination: the
+  main area takes the image files and the sidebar takes the folders.
+- While a valid drop is hovering, a 2 px accent frame marks the main area or the
+  sidebar. Its top edge is 1 px inside the toolbar boundary; the left, right and
+  bottom edges are 2 px inside the target.
+- Dropping anywhere else, and any drop in review mode, does nothing.
 
 ## Zoom and pan
 
@@ -95,6 +110,9 @@
 - Only the first level of a folder is listed, images only, sorted by file name
   (case-insensitive).
 - Panes scroll with the wheel or by dragging the overlay scrollbar.
+- The sidebar is 240 px wide by default. Drag the divider on its right edge to
+  resize it; the width is clamped to 160 px minimum and leaves at least 320 px
+  for the grid.
 - A dot marks files that are currently shown in the grid.
 
 ### Selection
@@ -103,6 +121,9 @@
 |---|---|
 | Single click | Selects only that row |
 | `Ctrl` + click | Adds/removes a row, across both panes |
+| `Shift` + click | Selects the range from the last clicked row to this row in the same pane |
+| `Ctrl` + `Shift` + click | Adds that range to the existing selection |
+| Right click | Opens the row menu; a row outside the current selection becomes the only selected row |
 
 ### Row actions
 
@@ -118,7 +139,7 @@ Row menu:
 
 | Item | Result |
 |---|---|
-| Open | Replaces the grid with the clicked image |
+| Open | Replaces the grid with every selected row, at most four, left pane first |
 | Add to main window | Adds the selected rows, at most four in total |
 | Show in Explorer | Opens Explorer with the file selected |
 | Open with... | Opens the system "Open with" chooser |
@@ -137,6 +158,7 @@ Entered with the toolbar `R` chip; requires exactly two folders.
 - The indicator shows `Review <n> / <total>`.
 - The sidebar only accepts double-clicks: single click, selection, the context
   menu and the pane header buttons are disabled.
+- File drag and drop is disabled.
 - Opening images, opening a folder, removing cells and swapping cells are
   disabled: the cell buttons are not drawn and `Ctrl+O` and `Ctrl+Shift+O` do
   nothing. Zooming, panning, rotating, solo view, local mode, `Q` swapping,

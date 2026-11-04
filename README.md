@@ -24,9 +24,11 @@ preview; the shipped artifact is a single self-contained `imview.exe`.
   exactly one pixel.
 - **EXIF and histogram** — per-image overlays, toggled from the toolbar.
 - **Folder sidebar** — one or two folders (the folder picker accepts multiple
-  selections), a dot marking the files already in the grid, multi-select with
-  `Ctrl`, and a row menu with *Open*, *Add to main window*,
-  *Show in Explorer*, *Open with...* and *Properties*.
+  selections), a resizable split from the grid, a dot marking the files already
+  in the grid, multi-select with `Ctrl` or `Shift`, and a row menu with *Open*,
+  *Add to main window*, *Show in Explorer*, *Open with...* and *Properties*.
+- **Drag and drop** — drop image files onto the main area to add them, or one or
+  two folders onto the sidebar; a highlight marks the active drop region.
 - **Review mode** — with two folders open, step through them as pairs (`Space`
   next, `B` previous) with editing commands disabled.
 - **About dialog** — version, project link and licence from the `ImView` menu.
@@ -50,6 +52,8 @@ run as `imexif <file>` and its output lines become the EXIF text.
 | `E` / `H` / `R` (toolbar) | EXIF / histogram / review mode |
 | `Space` / `B` | Review mode: next / previous pair |
 | Cell `✕` / cell four-way handle | Remove a cell / drag it onto another to swap |
+| `Shift`+click in the sidebar | Select a range from the last clicked row |
+| Drop files / folders | Add images to the main area / add folders to the sidebar |
 | `Esc` | Cancel a move, close the menu, or leave solo view |
 
 The full list is in [doc/shortcuts.md](doc/shortcuts.md).
@@ -90,6 +94,7 @@ Arguments may be image files or folders; folders open in the sidebar.
 | [doc/shortcuts.md](doc/shortcuts.md) | Keyboard and mouse reference |
 | [doc/interface.md](doc/interface.md) | Layout, sizes and colours |
 | [doc/architecture.md](doc/architecture.md) | Source map, data flow, threading |
+| [doc/eui-neo-gaps.md](doc/eui-neo-gaps.md) | Framework gaps and first-party adaptations |
 | [doc/build.md](doc/build.md) | Build requirements and commands |
 
 ## Scope

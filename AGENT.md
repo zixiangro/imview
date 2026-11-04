@@ -122,6 +122,7 @@ Two kinds of text, kept strictly separate:
    | `doc/shortcuts.md` | input reference |
    | `doc/interface.md` | layout, control sizes, colour tokens |
    | `doc/architecture.md` | source map, state model, data flow, threading |
+   | `doc/eui-neo-gaps.md` | framework gaps and the first-party adaptations that can migrate |
    | `doc/build.md` | requirements, commands, repository layout |
 
 2. **Working notes** live in `doc/notes/` and are **not committed** (see
@@ -142,6 +143,8 @@ same commit. When a change only explains *why*, put that in `doc/notes/`.
   paths that point at the author's machine.
 - No machine-specific content in tracked files: no toolchain installation paths,
   no absolute directories, no launcher scripts tied to one machine.
+- A commit that changes the project version number must contain only that version
+  bump; feature, documentation and build changes stay in separate commits.
 
 ## Checklist before finishing a change
 

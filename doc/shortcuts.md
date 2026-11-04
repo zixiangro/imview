@@ -12,6 +12,18 @@
 Review mode is entered and left with the `R` chip only: `Ctrl+O` and
 `Ctrl+Shift+O` do nothing there. `Esc` keeps its usual meaning.
 
+## File drag and drop
+
+| Input | Condition | Action |
+|---|---|---|
+| Drop image files on the main area | Not in review mode | Add them to the grid, up to the four-image cap; the sidebar keeps its current visibility |
+| Drop one or two folders on the sidebar | Not in review mode, at least one pane free | Fill the free panes with those folders |
+| Drop on the other region, or in review mode | — | Nothing |
+
+The main area or the sidebar shows a 2 px accent frame while a valid drop
+hovers over it. The frame is inset 1 px from the toolbar boundary and 2 px from
+the other three edges.
+
 ## Grid
 
 | Input | Condition | Action |
@@ -44,6 +56,7 @@ Review mode is entered and left with the `R` chip only: `Ctrl+O` and
 | `P`, `Q`, `1` – `4`, double click, `Ctrl+B` | Still available |
 | `Ctrl+O`, `Ctrl+Shift+O` | Nothing; the `R` chip leaves review mode |
 | Cell `x` and move handles | Not drawn |
+| File and folder drops | Nothing |
 
 Removing a cell, swapping cells, opening images and opening a folder are all
 unavailable while review mode is on.
@@ -63,10 +76,13 @@ unavailable while review mode is on.
 |---|---|
 | Single click | Select one row |
 | `Ctrl` + click | Toggle a row in the selection (both panes) |
+| `Shift` + click | Select the range from the last clicked row to this row in the same pane |
+| `Ctrl` + `Shift` + click | Add that range to the existing selection |
 | Double click | Clear the grid and show that image (in review mode: show the pair) |
-| Right click | Row menu: `Open`, `Add to main window`, `Show in Explorer`, `Open with...`, `Properties` |
+| Right click | Row menu: `Open`, `Add to main window`, `Show in Explorer`, `Open with...`, `Properties`. A row outside the selection becomes the only selected row. `Open` uses the whole selection. |
 | Mouse wheel | Scroll that pane (both panes together in review mode) |
 | Drag scrollbar | Scroll that pane |
+| Drag the right divider | Resize the sidebar (160 px minimum, 320 px left for the grid) |
 
 ## Title bar
 

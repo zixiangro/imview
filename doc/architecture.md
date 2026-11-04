@@ -1,7 +1,8 @@
 # Architecture
 
 The application is a single executable that builds on EUI-NEO. All application
-code lives in `src/`; EUI-NEO is used only through its public headers.
+code lives in `src/`; EUI-NEO is used through its public headers, with the
+first-party adaptations listed in [eui-neo-gaps.md](eui-neo-gaps.md).
 
 ## Source layout
 
@@ -11,7 +12,7 @@ code lives in `src/`; EUI-NEO is used only through its public headers.
 | `src/stb_wrap.cpp` / `.h` | Image decoding with stb_image over a memory-mapped file |
 | `src/exif.cpp` / `.h` | EXIF reader for JPEG (APP1) and PNG (`eXIf`); walks the container with seeks, so image data is never read |
 | `src/shell_actions.cpp` / `.h` | Native file/folder pickers, URL/file opening, "show in Explorer", "open with", "properties" |
-| `src/window_frame.cpp` / `.h` | Borderless Win32 window: custom frame, native drag/resize, window buttons, DPI scale |
+| `src/window_frame.cpp` / `.h` | Borderless Win32 window: custom frame, native drag/resize, window buttons, DPI scale, cursor, OLE file-drop target |
 | `src/utf8.h` | UTF-8/UTF-16 conversion, shared by the app and the shell actions |
 | `tests/tests.cpp` | Logic tests: UTF-8, EXIF, decoding |
 
@@ -61,7 +62,10 @@ AppState
 ├─ localMode, showExif, showHistogram
 ├─ folders[0..1]             sidebar panes
 │   └─ FolderPane: dir, paths, names, scroll, listHeight
+├─ sidebarVisible, sidebarWidth, sidebarDragStartWidth
 ├─ selected[]                (pane, index) pairs, shared across panes
+├─ selectionAnchor           last clicked row for Shift ranges
+├─ dropTarget                none / main grid / sidebar
 ├─ reviewMode, reviewIndex
 ├─ cellClick, rowClick       double-click trackers
 ├─ menuOpen, menuKind, menuX/Y, menuPane, menuIndex
@@ -93,6 +97,11 @@ ImView menu / sidebar double click / command line
 Review mode drives the same path: `openReviewPair(n)` clears the grid and calls
 `addPaths` with the two files of pair `n`, left folder first.
 
+Explorer drags enter through the OLE drop target in `window_frame.cpp`. Its
+`FileDropEvent` phases update the highlighted destination; the drop phase calls
+`handleFileDrop`, which routes image files to `addPaths` and folders to
+`addFoldersFromDrop`.
+
 ## Decoding
 
 - `decodeRgba()` maps the file read-only (`CreateFileMappingW` + `MapViewOfFile`,
@@ -114,9 +123,15 @@ Review mode drives the same path: `openReviewPair(n)` clears the grid and calls
 | `WM_NCHITTEST` | Edge bands become resize borders; the title band becomes `HTCAPTION` |
 | `WM_NCLBUTTONDBLCLK` | Maximise/restore using the app's own maximise |
 | `WM_SIZE` | Convert a system maximise into the app's own geometry |
+| `WM_SETCURSOR` | Horizontal-resize cursor over the sidebar splitter |
 | `WM_ENTERSIZEMOVE` | Restore a maximised window before dragging |
 | `DwmSetWindowAttribute` | Square corners and no native border line while maximised |
 | `SetWindowRgn` | Full-window region while maximised, so DWM cannot reveal the desktop at rounded corners |
+
+`IDropTarget` is registered with `RegisterDragDrop`. It converts `CF_HDROP`
+paths to UTF-8, reports drag enter/over/leave/drop with logical client
+coordinates, and lets the application choose `DROPEFFECT_COPY` or
+`DROPEFFECT_NONE` for the shell cursor.
 
 Maximising resizes to the monitor work area rather than entering the native
 zoomed state, because a zoomed window forces a frame-inflated rect that

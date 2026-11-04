@@ -1,5 +1,9 @@
 #pragma once
 
+#include <functional>
+#include <string>
+#include <vector>
+
 namespace imview::frame {
 
 // Borderless-window support (Windows).
@@ -34,6 +38,32 @@ void centerWindow();
 // Enables/disables the native title-bar drag band. While an in-app menu is
 // open, dragging must be suppressed so clicks reach the UI and dismiss it.
 void setTitleBarDragEnabled(bool enabled);
+
+// File drag-and-drop. EUI-NEO has no drop API, so the application installs an
+// OLE drop target on its own window and receives the phases here. Coordinates
+// are logical client units; paths arrive in UTF-8. The handler returns true only
+// when the current position is a valid drop target, which also selects the
+// copy/no-drop cursor shown by the shell.
+enum class FileDropPhase { Enter, Over, Leave, Drop };
+
+struct FileDropEvent {
+    FileDropPhase phase = FileDropPhase::Enter;
+    float x = 0.0f;
+    float y = 0.0f;
+    bool hasFiles = false;
+    bool hasDirectories = false;
+    std::vector<std::string> paths;
+};
+
+using FileDropHandler = std::function<bool(const FileDropEvent&)>;
+
+void setFileDropHandler(FileDropHandler handler);
+void shutdownFileDrop();
+
+// Logical x coordinate of the sidebar splitter's grab band. While the pointer
+// is over that band the window shows the horizontal-resize cursor. Pass a
+// negative value when the splitter is unavailable.
+void setSidebarSplitter(float logicalX);
 
 // Logical-to-pixel factor of the window (1.0 at 96 dpi). Pointer events inside
 // the app arrive in physical pixels, so drag targeting divides by this.

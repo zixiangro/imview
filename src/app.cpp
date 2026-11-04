@@ -92,6 +92,9 @@ constexpr const char* kProjectUrl = IMVIEW_HOMEPAGE;
 
 // Sidebar geometry
 constexpr float kSidebarWidth = 240.0f;
+constexpr float kSidebarMinWidth = 160.0f;
+constexpr float kMainMinWidth = 320.0f;
+constexpr float kSidebarResizeHandleWidth = 6.0f;
 constexpr float kSidebarRowHeight = 22.0f;
 constexpr float kSidebarHeaderHeight = 30.0f;
 
@@ -256,7 +259,16 @@ struct AppState {
     };
     std::vector<FolderPane> folders;
     std::vector<RowRef> selected; // selection is shared across panes
+    RowRef selectionAnchor;
+    bool hasSelectionAnchor = false;
     bool sidebarVisible = true;
+    float sidebarWidth = kSidebarWidth;
+    float sidebarDragStartWidth = kSidebarWidth;
+    // Destination highlighted while the shell drags files or folders over the
+    // window. OLE reports the position before the drop, so the highlight can
+    // follow the pointer.
+    enum class DropTarget { None, Main, Sidebar };
+    DropTarget dropTarget = DropTarget::None;
     // Review mode: two folders compared pair by pair.
     bool reviewMode = false;
     int reviewIndex = 0;
@@ -275,6 +287,17 @@ struct AppState {
 AppState& state() {
     static AppState instance;
     return instance;
+}
+
+// The sidebar keeps a usable main area for narrow windows; the stored width is
+// the user's preference and is clamped to the current window each compose.
+float clampSidebarWidth(float width, float screenWidth) {
+    const float maximum = std::max(kSidebarMinWidth, screenWidth - kMainMinWidth);
+    return std::clamp(width, kSidebarMinWidth, maximum);
+}
+
+float sidebarWidthFor(float screenWidth) {
+    return clampSidebarWidth(state().sidebarWidth, screenWidth);
 }
 
 // The popup menu and the About dialog swallow clicks, so the title bar must
@@ -599,10 +622,23 @@ void addFolder(const std::string& directory) {
         selected.erase(std::remove_if(selected.begin(), selected.end(),
                                       [](const AppState::RowRef& row) { return row.pane == 1; }),
                        selected.end());
+        state().hasSelectionAnchor = false;
         state().folders[1] = std::move(pane);
     }
     state().sidebarVisible = true;
     setMenuOpen(false);
+}
+
+// Drops add folders to free panes; with both panes occupied the drop has no
+// target. The two-folder case is processed in order, so dropping two folders
+// into an empty sidebar fills both panes.
+void addFoldersFromDrop(const std::vector<std::string>& directories) {
+    if (state().reviewMode) return;
+    for (const std::string& directory : directories) {
+        if (state().folders.size() >= 2) break;
+        addFolder(directory);
+    }
+    app::requestUpdate();
 }
 
 // Replaces one pane's folder through the system picker.
@@ -622,6 +658,7 @@ void replacePaneFolder(int paneIndex) {
                                       return row.pane == paneIndex;
                                   }),
                    selected.end());
+    state().hasSelectionAnchor = false;
     state().folders[static_cast<std::size_t>(paneIndex)] = std::move(pane);
     setMenuOpen(false);
 }
@@ -641,6 +678,7 @@ void closePane(int paneIndex) {
     selected.erase(std::remove_if(selected.begin(), selected.end(),
                                   [](const AppState::RowRef& row) { return row.pane < 0; }),
                    selected.end());
+    state().hasSelectionAnchor = false;
     setMenuOpen(false);
 }
 
@@ -658,18 +696,38 @@ void openFolder() {
     // pane; the sidebar shows at most two folders.
     state().folders.clear();
     state().selected.clear();
+    state().hasSelectionAnchor = false;
     for (const std::string& directory : directories) {
         if (state().folders.size() >= 2) break;
         addFolder(directory);
     }
 }
 
-// Click handling. Ctrl toggles a row across both panes.
-void selectRow(int paneIndex, int index, bool ctrl) {
+// Click handling. Ctrl toggles a row across both panes; Shift extends from the
+// last clicked row in the same pane. Ctrl+Shift adds that range to an existing
+// selection.
+void selectRow(int paneIndex, int index, bool ctrl, bool shift) {
     if (paneIndex < 0 || paneIndex >= static_cast<int>(state().folders.size())) return;
     auto& pane = state().folders[static_cast<std::size_t>(paneIndex)];
     if (index < 0 || index >= static_cast<int>(pane.paths.size())) return;
     auto& selected = state().selected;
+
+    const bool range = shift && state().hasSelectionAnchor &&
+                       state().selectionAnchor.pane == paneIndex &&
+                       state().selectionAnchor.index >= 0 &&
+                       state().selectionAnchor.index < static_cast<int>(pane.paths.size());
+    if (range) {
+        const int first = std::min(state().selectionAnchor.index, index);
+        const int last = std::max(state().selectionAnchor.index, index);
+        if (!ctrl) selected.clear();
+        for (int rowIndex = first; rowIndex <= last; ++rowIndex) {
+            if (!isSelected(paneIndex, rowIndex)) {
+                selected.push_back({paneIndex, rowIndex});
+            }
+        }
+        app::requestUpdate();
+        return;
+    }
 
     if (ctrl) {
         const auto it = std::find_if(selected.begin(), selected.end(),
@@ -685,13 +743,31 @@ void selectRow(int paneIndex, int index, bool ctrl) {
         selected.clear();
         selected.push_back({paneIndex, index});
     }
+    state().selectionAnchor = {paneIndex, index};
+    state().hasSelectionAnchor = true;
     app::requestUpdate();
 }
 
-void openSingleInGrid(int paneIndex, int index) {
-    if (paneIndex < 0 || paneIndex >= static_cast<int>(state().folders.size())) return;
-    const auto& pane = state().folders[static_cast<std::size_t>(paneIndex)];
-    if (index < 0 || index >= static_cast<int>(pane.paths.size())) return;
+// Selection in pane-then-index order, skipping rows whose folder is gone.
+std::vector<std::string> selectedPaths() {
+    std::vector<AppState::RowRef> rows = state().selected;
+    std::sort(rows.begin(), rows.end(),
+              [](const AppState::RowRef& left, const AppState::RowRef& right) {
+                  if (left.pane != right.pane) return left.pane < right.pane;
+                  return left.index < right.index;
+              });
+    std::vector<std::string> paths;
+    for (const auto& row : rows) {
+        if (row.pane < 0 || row.pane >= static_cast<int>(state().folders.size())) continue;
+        const auto& pane = state().folders[static_cast<std::size_t>(row.pane)];
+        if (row.index < 0 || row.index >= static_cast<int>(pane.paths.size())) continue;
+        paths.push_back(pane.paths[static_cast<std::size_t>(row.index)]);
+    }
+    return paths;
+}
+
+// Drops the current grid while keeping the sidebar selection in place.
+void resetGridForOpen() {
     state().images.clear();
     state().soloId = -1;
     state().peekId = -1;
@@ -702,7 +778,24 @@ void openSingleInGrid(int paneIndex, int index) {
     state().qSwapActive = false;
     resetPans();
     clearSelections();
+}
+
+void openSingleInGrid(int paneIndex, int index) {
+    if (paneIndex < 0 || paneIndex >= static_cast<int>(state().folders.size())) return;
+    const auto& pane = state().folders[static_cast<std::size_t>(paneIndex)];
+    if (index < 0 || index >= static_cast<int>(pane.paths.size())) return;
+    resetGridForOpen();
     addPaths({pane.paths[static_cast<std::size_t>(index)]}, true);
+}
+
+// The row menu's Open: the highlighted rows decide what is shown, so a plain
+// right-click on an unselected row still opens just that row (it became the
+// selection when the menu opened).
+void openSelectionInGrid() {
+    const std::vector<std::string> paths = selectedPaths();
+    if (paths.empty()) return;
+    resetGridForOpen();
+    addPaths(paths, true);
 }
 
 // --- review mode --------------------------------------------------------------
@@ -785,6 +878,7 @@ void openReviewPair(int index) {
     // Highlight the pair rows in both panes.
     auto& selected = state().selected;
     selected.clear();
+    state().hasSelectionAnchor = false;
     if (pair < static_cast<int>(folders[0].paths.size())) selected.push_back({0, pair});
     if (pair < static_cast<int>(folders[1].paths.size())) selected.push_back({1, pair});
 
@@ -795,6 +889,7 @@ void openReviewPair(int index) {
 void enterReviewMode() {
     if (!reviewAvailable()) return;
     state().reviewMode = true;
+    state().dropTarget = AppState::DropTarget::None;
     state().sidebarVisible = true;
     openReviewPair(0);
     app::requestUpdate();
@@ -822,20 +917,8 @@ void reviewStep(int delta) {
 
 // Appends the selection (both panes, pane then index order), capped at four.
 void addSelectionToGrid() {
-    if (state().selected.empty()) return;
-    std::vector<AppState::RowRef> rows = state().selected;
-    std::sort(rows.begin(), rows.end(),
-              [](const AppState::RowRef& left, const AppState::RowRef& right) {
-                  if (left.pane != right.pane) return left.pane < right.pane;
-                  return left.index < right.index;
-              });
-    std::vector<std::string> paths;
-    for (const auto& row : rows) {
-        if (row.pane < 0 || row.pane >= static_cast<int>(state().folders.size())) continue;
-        const auto& pane = state().folders[static_cast<std::size_t>(row.pane)];
-        if (row.index < 0 || row.index >= static_cast<int>(pane.paths.size())) continue;
-        paths.push_back(pane.paths[static_cast<std::size_t>(row.index)]);
-    }
+    const std::vector<std::string> paths = selectedPaths();
+    if (paths.empty()) return;
     addPaths(paths, true);
 }
 
@@ -1373,6 +1456,96 @@ void addPaths(const std::vector<std::string>& paths, bool fromSidebar) {
         }
         app::requestUpdate();
     }
+}
+
+// --- file drop ----------------------------------------------------------------
+
+bool isDirectoryPath(const std::string& path) {
+    std::error_code error;
+    return std::filesystem::is_directory(std::filesystem::u8path(path), error) && !error;
+}
+
+// A file drop is accepted only when at least one image would actually be added
+// (the grid is not full and the file is not already open).
+bool hasNewDroppedImage(const std::vector<std::string>& paths) {
+    if (state().images.size() >= kMaxImages) return false;
+    for (const std::string& path : paths) {
+        if (!isImagePath(path)) continue;
+        if (!isOpenInGrid(path)) return true;
+    }
+    return false;
+}
+
+// Folder drops add to free panes only; a full sidebar has no drop target, and a
+// folder that is already open would not fill a pane.
+bool hasDroppedFolderSlot(const std::vector<std::string>& paths) {
+    if (state().folders.size() >= 2) return false;
+    for (const std::string& path : paths) {
+        if (!isDirectoryPath(path)) continue;
+        const bool alreadyOpen = std::any_of(
+            state().folders.begin(), state().folders.end(),
+            [&](const AppState::FolderPane& pane) { return samePath(pane.dir, path); });
+        if (!alreadyOpen) return true;
+    }
+    return false;
+}
+
+bool handleFileDrop(const imview::frame::FileDropEvent& event) {
+    const bool overSidebar = state().sidebarVisible && event.y >= kToolbarHeight &&
+                             event.x < state().sidebarWidth;
+    const bool overMain = event.y >= kToolbarHeight &&
+                          (!state().sidebarVisible || event.x >= state().sidebarWidth);
+
+    bool accepted = false;
+    AppState::DropTarget target = AppState::DropTarget::None;
+    if (!state().reviewMode) {
+        if (overMain && event.hasFiles) {
+            accepted = hasNewDroppedImage(event.paths);
+            if (accepted) target = AppState::DropTarget::Main;
+        } else if (overSidebar && event.hasDirectories) {
+            accepted = hasDroppedFolderSlot(event.paths);
+            if (accepted) target = AppState::DropTarget::Sidebar;
+        }
+    }
+
+    if (event.phase == imview::frame::FileDropPhase::Leave) {
+        if (state().dropTarget != AppState::DropTarget::None) {
+            state().dropTarget = AppState::DropTarget::None;
+            app::requestUpdate();
+        }
+        return false;
+    }
+
+    if (event.phase == imview::frame::FileDropPhase::Drop) {
+        if (state().dropTarget != AppState::DropTarget::None) {
+            state().dropTarget = AppState::DropTarget::None;
+            app::requestUpdate();
+        }
+        if (!accepted) return false;
+        if (target == AppState::DropTarget::Main) {
+            std::vector<std::string> files;
+            for (const std::string& path : event.paths) {
+                if (!isDirectoryPath(path) && isImagePath(path)) files.push_back(path);
+            }
+            if (files.empty()) return false;
+            // fromSidebar=true keeps the sidebar visible while adding to the grid.
+            addPaths(files, true);
+        } else {
+            std::vector<std::string> directories;
+            for (const std::string& path : event.paths) {
+                if (isDirectoryPath(path)) directories.push_back(path);
+            }
+            if (directories.empty()) return false;
+            addFoldersFromDrop(directories);
+        }
+        return true;
+    }
+
+    if (state().dropTarget != target) {
+        state().dropTarget = target;
+        app::requestUpdate();
+    }
+    return accepted;
 }
 
 // --- file dialog ---------------------------------------------------------------
@@ -2157,7 +2330,7 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
     const float gap = 8.0f;
     const int count = static_cast<int>(state().images.size());
     const float top = kToolbarHeight;
-    const float left = state().sidebarVisible ? kSidebarWidth : 0.0f;
+    const float left = state().sidebarVisible ? sidebarWidthFor(screen.width) : 0.0f;
     const float availableWidth = screen.width - left - margin * 2.0f;
     const float availableHeight = screen.height - top - margin * 2.0f;
 
@@ -2352,7 +2525,7 @@ void composeContextMenu(eui::Ui& ui, const eui::Screen& screen) {
                         }
                         const std::string path = pane.paths[static_cast<std::size_t>(index)];
                         switch (item) {
-                            case 0: openSingleInGrid(paneIndex, index); break;
+                            case 0: openSelectionInGrid(); break;
                             case 1: addSelectionToGrid(); break;
                             case 2: imview::shell::showInExplorer(path); break;
                             case 3: imview::shell::openWith(path); break;
@@ -2369,7 +2542,7 @@ void composeContextMenu(eui::Ui& ui, const eui::Screen& screen) {
 // One row of a pane's file list: background, "already open" dot, name and the
 // click / context-menu surface on top.
 void composeSidebarRow(eui::Ui& ui, int paneIndex, const AppState::FolderPane& pane,
-                       int index) {
+                       int index, float width) {
     const std::string paneId = "pane" + std::to_string(paneIndex);
         const float rowY =
             static_cast<float>(index) * kSidebarRowHeight - pane.scroll;
@@ -2377,15 +2550,15 @@ void composeSidebarRow(eui::Ui& ui, int paneIndex, const AppState::FolderPane& p
         const bool rowSelected = isSelected(paneIndex, index);
         const bool open = isOpenInGrid(pane.paths[static_cast<std::size_t>(index)]);
         ui.stack(rowId).position(0.0f, rowY)
-            .size(kSidebarWidth, kSidebarRowHeight)
-            .content([&, index, rowSelected, open, rowId] {
+            .size(width, kSidebarRowHeight)
+            .content([&, index, rowSelected, open, rowId, width] {
                 const eui::Color base = rowSelected
                     ? eui::Color{0.043f, 0.231f, 0.376f, 1.0f}
                     : eui::Color{0.0f, 0.0f, 0.0f, 0.0f};
                 const eui::Color hover = rowSelected
                     ? base
                     : eui::Color{1.0f, 1.0f, 1.0f, 0.055f};
-                ui.rect(rowId + ".bg").size(kSidebarWidth, kSidebarRowHeight)
+                ui.rect(rowId + ".bg").size(width, kSidebarRowHeight)
                     .color(base).states(base, hover, hover).build();
                 if (open) {
                     ui.rect(rowId + ".dot")
@@ -2393,7 +2566,7 @@ void composeSidebarRow(eui::Ui& ui, int paneIndex, const AppState::FolderPane& p
                         .size(4.0f, 4.0f).radius(2.0f).color(kAccent).build();
                 }
                 ui.text(rowId + ".name").position(14.0f, 0.0f)
-                    .size(kSidebarWidth - 22.0f, kSidebarRowHeight)
+                    .size(width - 22.0f, kSidebarRowHeight)
                     .text(pane.names[static_cast<std::size_t>(index)])
                     .color(rowSelected ? kWhite
                                        : (open ? kTextPrimary : kTextSecondary))
@@ -2402,8 +2575,8 @@ void composeSidebarRow(eui::Ui& ui, int paneIndex, const AppState::FolderPane& p
             }).build();
 
         ui.stack(rowId + ".hitstack").position(0.0f, rowY)
-            .size(kSidebarWidth, kSidebarRowHeight).content([&, index, rowId] {
-                ui.rect(rowId + ".hit").size(kSidebarWidth, kSidebarRowHeight)
+            .size(width, kSidebarRowHeight).content([&, index, rowId, width] {
+                ui.rect(rowId + ".hit").size(width, kSidebarRowHeight)
                     .color({0.0f, 0.0f, 0.0f, 0.0f})
                     .onPress([paneIndex, index](const core::PointerEvent& event,
                                                 const core::Rect&) {
@@ -2415,14 +2588,15 @@ void composeSidebarRow(eui::Ui& ui, int paneIndex, const AppState::FolderPane& p
                                 openReviewPair(index);
                                 app::requestUpdate();
                             } else {
-                                selectRow(paneIndex, index, false);
+                                selectRow(paneIndex, index, false, false);
                                 openSingleInGrid(paneIndex, index);
                             }
                             return;
                         }
                         // Review mode disables every other sidebar action.
                         if (state().reviewMode) return;
-                        selectRow(paneIndex, index, event.modifiers.control);
+                        selectRow(paneIndex, index, event.modifiers.control,
+                                  event.modifiers.shift);
                     })
                     .onContextMenu([paneIndex, index](const core::PointerEvent& event,
                                                       const core::Rect&) {
@@ -2434,7 +2608,7 @@ void composeSidebarRow(eui::Ui& ui, int paneIndex, const AppState::FolderPane& p
                         if (index < 0 ||
                             index >= static_cast<int>(target.paths.size())) return;
                         if (!isSelected(paneIndex, index)) {
-                            selectRow(paneIndex, index, false);
+                            selectRow(paneIndex, index, false, false);
                         }
                         openRowMenu(paneIndex, index, static_cast<float>(event.x),
                                     static_cast<float>(event.y));
@@ -2447,7 +2621,7 @@ void composeSidebarRow(eui::Ui& ui, int paneIndex, const AppState::FolderPane& p
 // Overlay scrollbar, shown only when the list overflows. In review mode both
 // panes use the longer list's geometry so the two thumbs stay aligned.
 void composeSidebarScrollbar(eui::Ui& ui, int paneIndex, const AppState::FolderPane& pane,
-                             float listTop, float listHeight) {
+                             float listTop, float listHeight, float width) {
     const std::string paneId = "pane" + std::to_string(paneIndex);
     // Overlay scrollbar (VS Code style): only when the list overflows.
     // In review mode both panes use the longer list's geometry so the two
@@ -2469,7 +2643,7 @@ void composeSidebarScrollbar(eui::Ui& ui, int paneIndex, const AppState::FolderP
             ? std::clamp(pane.scroll / maxScroll, 0.0f, 1.0f)
             : 0.0f;
         const float thumbY = listTop + (trackHeight - thumbHeight) * progress;
-        ui.rect(paneId + ".scrollbar").position(kSidebarWidth - 7.0f, thumbY)
+        ui.rect(paneId + ".scrollbar").position(width - 7.0f, thumbY)
             .size(4.0f, thumbHeight).radius(2.0f)
             .color({1.0f, 1.0f, 1.0f, 0.22f})
             .states({1.0f, 1.0f, 1.0f, 0.22f},
@@ -2478,7 +2652,7 @@ void composeSidebarScrollbar(eui::Ui& ui, int paneIndex, const AppState::FolderP
             .build();
         // Wider invisible grab area: dragging scrolls the pane.
         const float travel = trackHeight - thumbHeight;
-        ui.rect(paneId + ".scrollbar.hit").position(kSidebarWidth - 10.0f, thumbY)
+        ui.rect(paneId + ".scrollbar.hit").position(width - 10.0f, thumbY)
             .size(9.0f, thumbHeight)
             .color({0.0f, 0.0f, 0.0f, 0.0f})
             .acceptedButtons(eui::PointerButton::Left)
@@ -2504,14 +2678,16 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
     if (!state().sidebarVisible) return;
     const float top = kToolbarHeight;
     const float totalHeight = screen.height - top;
+    const float width = sidebarWidthFor(screen.width);
+    state().sidebarWidth = width;
     const int paneCount = static_cast<int>(state().folders.size());
     const int visiblePanes = std::max(1, paneCount);
     const float paneHeight = totalHeight / static_cast<float>(visiblePanes);
-    ui.stack("sidebar").position(0.0f, top).size(kSidebarWidth, totalHeight)
+    ui.stack("sidebar").position(0.0f, top).size(width, totalHeight)
         .zIndex(60).content([&] {
-        ui.rect("sidebar.bg").size(kSidebarWidth, totalHeight)
+        ui.rect("sidebar.bg").size(width, totalHeight)
             .color({0.094f, 0.094f, 0.094f, 1.0f}).build();
-        ui.rect("sidebar.edge").position(kSidebarWidth - 1.0f, 0.0f)
+        ui.rect("sidebar.edge").position(width - 1.0f, 0.0f)
             .size(1.0f, totalHeight).color(kBorder).build();
 
         if (paneCount == 0) {
@@ -2535,7 +2711,7 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
 
             // Header: folder name plus add / change / close buttons.
             ui.text(paneId + ".title").position(10.0f, paneTop)
-                .size(kSidebarWidth - 78.0f, kSidebarHeaderHeight)
+                .size(width - 78.0f, kSidebarHeaderHeight)
                 .text(std::filesystem::u8path(pane.dir).filename().u8string())
                 .color(kTextSecondary).fontSize(11.0f)
                 .verticalAlign(eui::VerticalAlign::Center).build();
@@ -2544,24 +2720,24 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
             if (!state().reviewMode) {
                 // Only one pane: offer to add the second folder.
                 if (paneCount == 1) {
-                    composePaneHeaderButton(ui, paneId + ".add", kSidebarWidth - 70.0f,
+                    composePaneHeaderButton(ui, paneId + ".add", width - 70.0f,
                                             paneTop + 4.0f, 20.0f, "+",
                                             [] { openFolder(); });
                 }
-                composePaneHeaderButton(ui, paneId + ".open", kSidebarWidth - 46.0f,
+                composePaneHeaderButton(ui, paneId + ".open", width - 46.0f,
                                         paneTop + 4.0f, 20.0f, "...",
                                         [paneIndex] { replacePaneFolder(paneIndex); });
-                composePaneHeaderButton(ui, paneId + ".close", kSidebarWidth - 24.0f,
+                composePaneHeaderButton(ui, paneId + ".close", width - 24.0f,
                                         paneTop + 4.0f, 20.0f, "x",
                                         [paneIndex] { closePane(paneIndex); });
             }
             ui.rect(paneId + ".divider").position(0.0f, paneTop + kSidebarHeaderHeight - 1.0f)
-                .size(kSidebarWidth, 1.0f).color(kBorder).build();
+                .size(width, 1.0f).color(kBorder).build();
 
 
             if (count == 0) {
                 ui.text(paneId + ".empty").position(10.0f, listTop + 10.0f)
-                    .size(kSidebarWidth - 20.0f, 36.0f)
+                    .size(width - 20.0f, 36.0f)
                     .text("No images in folder").color(kTextSecondary).fontSize(11.5f)
                     .build();
             }
@@ -2572,9 +2748,9 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
             const int lastRow = std::min(count, firstRow + visibleRows);
 
             ui.stack(paneId + ".list").position(0.0f, listTop)
-                .size(kSidebarWidth, listHeight).clip().content([&] {
+                .size(width, listHeight).clip().content([&] {
                 // Wheel surface first so rows stay clickable on top of it.
-                ui.rect(paneId + ".wheel").size(kSidebarWidth, std::max(listHeight, 1.0f))
+                ui.rect(paneId + ".wheel").size(width, std::max(listHeight, 1.0f))
                     .color({0.0f, 0.0f, 0.0f, 0.0f})
                     .onScroll([paneIndex, listHeight](const core::ScrollEvent& event) {
                         if (event.y == 0.0) return;
@@ -2597,18 +2773,77 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
                     .build();
 
                 for (int index = firstRow; index < lastRow; ++index) {
-                    composeSidebarRow(ui, paneIndex, pane, index);
+                    composeSidebarRow(ui, paneIndex, pane, index, width);
                 }
             }).build();
 
-            composeSidebarScrollbar(ui, paneIndex, pane, listTop, listHeight);
+            composeSidebarScrollbar(ui, paneIndex, pane, listTop, listHeight, width);
             // Divider between the two panes.
             if (paneIndex + 1 < paneCount) {
                 ui.rect(paneId + ".split").position(0.0f, paneBottom - 1.0f)
-                    .size(kSidebarWidth, 1.0f).color(kBorder).build();
+                    .size(width, 1.0f).color(kBorder).build();
             }
         }
     }).build();
+}
+
+// Vertical grab band on the sidebar's right edge. It lives in the main area so
+// it never competes with the row and scrollbar surfaces inside the sidebar.
+void composeSidebarResizeHandle(eui::Ui& ui, const eui::Screen& screen, float width) {
+    const float top = kToolbarHeight;
+    const float height = screen.height - top;
+    const float screenWidth = screen.width;
+    ui.rect("sidebar.splitter").position(width - 1.0f, top)
+        .size(kSidebarResizeHandleWidth, height)
+        .zIndex(61)
+        .color({0.0f, 0.0f, 0.0f, 0.0f})
+        .states({0.0f, 0.0f, 0.0f, 0.0f},
+                {1.0f, 1.0f, 1.0f, 0.07f},
+                {0.0f, 0.471f, 0.831f, 0.30f})
+        .acceptedButtons(eui::PointerButton::Left)
+        .onPress([](const core::PointerEvent& event, const core::Rect&) {
+            if (event.button != eui::PointerButton::Left) return;
+            state().sidebarDragStartWidth = state().sidebarWidth;
+        })
+        .onDrag([screenWidth](const core::dsl::DragEvent& event) {
+            if (event.button != eui::PointerButton::Left) return;
+            const float scale = imview::frame::dpiScale();
+            const float delta = scale > 0.0f
+                ? static_cast<float>(event.totalX) / scale
+                : static_cast<float>(event.totalX);
+            state().sidebarWidth = clampSidebarWidth(
+                state().sidebarDragStartWidth + delta, screenWidth);
+            app::requestUpdate();
+        })
+        .cursor(eui::CursorShape::Arrow)
+        .build();
+}
+
+// Accent frame around the region that will receive the current shell drag. The
+// frame follows the pointer because the OLE drop target reports DragOver.
+void composeDropHighlight(eui::Ui& ui, const eui::Screen& screen, float sidebarWidth) {
+    if (state().dropTarget == AppState::DropTarget::None) return;
+    constexpr float kTopInset = 1.0f;
+    constexpr float kSideInset = 2.0f;
+    float x = 0.0f;
+    float width = screen.width;
+    if (state().dropTarget == AppState::DropTarget::Sidebar) {
+        width = sidebarWidth;
+    } else if (state().sidebarVisible) {
+        x = sidebarWidth;
+        width -= sidebarWidth;
+    }
+    const float frameX = x + kSideInset;
+    const float frameY = kToolbarHeight + kTopInset;
+    const float frameWidth = width - kSideInset * 2.0f;
+    const float frameHeight = screen.height - kSideInset - frameY;
+    if (frameWidth <= 0.0f || frameHeight <= 0.0f) return;
+    ui.rect("drop.highlight").position(frameX, frameY)
+        .size(frameWidth, frameHeight)
+        .zIndex(62)
+        .color({0.0f, 0.0f, 0.0f, 0.0f})
+        .border(2.0f, kAccent)
+        .build();
 }
 
 } // namespace
@@ -2616,6 +2851,11 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
 // NOTE: must have external linkage; EUI's entry point calls it via
 // qualified name lookup from another translation unit.
 void compose(eui::Ui& ui, const eui::Screen& screen) {
+    const float sidebarWidth = sidebarWidthFor(screen.width);
+    imview::frame::setSidebarSplitter(
+        state().sidebarVisible && !state().menuOpen && !state().aboutOpen
+            ? sidebarWidth - 1.0f
+            : -1.0f);
     ui.stack("root").size(screen.width, screen.height)
         .cursor(eui::CursorShape::Arrow)
         .content([&] {
@@ -2624,6 +2864,10 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
                 composeGrid(ui, screen);
             }
             composeSidebar(ui, screen);
+            if (state().sidebarVisible) {
+                composeSidebarResizeHandle(ui, screen, sidebarWidth);
+            }
+            composeDropHighlight(ui, screen, sidebarWidth);
             composeToolbar(ui, screen);
             composeContextMenu(ui, screen);
             composeAboutDialog(ui, screen);
@@ -2644,11 +2888,13 @@ const DslAppConfig& dslAppConfig() {
             // 36px title bar; the left 80px holds the ImView menu button and the
             // right 260px holds the toggles and window buttons.
             installImageSampler();
+            imview::frame::setFileDropHandler(handleFileDrop);
             imview::frame::installBorderlessWindow(kToolbarHeight, 80.0f, 260.0f);
             imview::frame::centerWindow();
             addPaths(launchArgs());
         })
         .onShutdown([] {
+            imview::frame::shutdownFileDrop();
 #if defined(EUI_RENDER_BACKEND_OPENGL)
             shutdownImageSampler();
             // GpuSource destructors may run after the GPU device is destroyed;
