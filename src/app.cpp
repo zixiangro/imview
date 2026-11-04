@@ -30,7 +30,7 @@
 #endif
 
 #ifndef IMVIEW_VERSION
-#define IMVIEW_VERSION "0.1.0"
+#define IMVIEW_VERSION "0.1.1"
 #endif
 #ifndef IMVIEW_HOMEPAGE
 #define IMVIEW_HOMEPAGE "https://github.com/zixiangro/imview"
