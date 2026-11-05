@@ -483,6 +483,14 @@ void installBorderlessWindow(float titleBarLogicalHeight,
 #endif
 }
 
+void setTitleBarLeftControlsWidth(float width) {
+#if defined(_WIN32)
+    gLeftControlsWidth = std::max(0.0f, width);
+#else
+    (void)width;
+#endif
+}
+
 void minimizeWindow() {
 #if defined(_WIN32)
     if (HWND hwnd = nativeWindow()) ShowWindow(hwnd, SW_MINIMIZE);

@@ -37,6 +37,18 @@ the other three edges.
 | `x` button in a cell | Not in review mode | Remove that cell |
 | move handle in a cell | Not in review mode, two or more cells | Drag onto another cell to swap the two |
 
+## Diff mode
+
+| Input | Condition | Action |
+|---|---|---|
+| `D` chip | Exactly two images | Enter or leave diff mode |
+| Drag the threshold slider | Diff mode | Set the threshold from 0 to 20 (default 5) |
+| Click the threshold track | Diff mode | Jump to that threshold and start dragging from it |
+
+Diff mode leaves automatically when an add or remove operation leaves a count
+other than two. Review pair changes and the sidebar's *Open* with exactly two
+selected rows keep it on.
+
 ## Solo view
 
 | Input | Action |
@@ -54,6 +66,7 @@ the other three edges.
 | `B` | Previous pair |
 | Double click a sidebar row | Open that pair |
 | `P`, `Q`, `1` – `4`, double click, `Ctrl+B` | Still available |
+| `D` / threshold slider | Still available when the pair has two images |
 | `Ctrl+O`, `Ctrl+Shift+O` | Nothing; the `R` chip leaves review mode |
 | Cell `x` and move handles | Not drawn |
 | File and folder drops | Nothing |

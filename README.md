@@ -19,6 +19,10 @@ preview; the shipped artifact is a single self-contained `imview.exe`.
 - **Solo view** — double-click a cell to see it full size; hold `1`–`4` to peek at
   another image on top of it.
 - **Two-image compare** — hold `Q` to paint the right image over the left cell.
+- **Diff mode** — with exactly two images, the `D` chip adds a third tile that
+  maps right-minus-left differences to blue/red over a grey background. A
+  title-bar slider sets the threshold (0–20, default 5). The diff tile is not a
+  grid image: it does not count towards the four-image cap.
 - **Local mode** — drag a rectangle and read the average `Luma`, `R/G`, `B/G`,
   `Sat`, `R`, `G`, `B` of that region on every image. A single click measures
   exactly one pixel.
@@ -49,6 +53,7 @@ run as `imexif <file>` and its output lines become the EXIF text.
 | Double click | Solo view (click again to leave) |
 | `Q` (hold) | Compare: right image over the left cell |
 | `P` | Local mode |
+| `D` (toolbar, two images) | Diff mode; the adjacent slider sets the threshold |
 | `E` / `H` / `R` (toolbar) | EXIF / histogram / review mode |
 | `Space` / `B` | Review mode: next / previous pair |
 | Cell `✕` / cell four-way handle | Remove a cell / drag it onto another to swap |

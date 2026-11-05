@@ -30,7 +30,7 @@ pointer capture and therefore receives no hover callbacks from other cells.
 | Thread | Work |
 |---|---|
 | UI / render | Composition, input, all state mutation |
-| Worker pool (EUI `async`) | Decoding, luma histogram, EXIF parsing |
+| Worker pool (EUI `async`) | Decoding, luma histogram, EXIF parsing, diff-map rebuilding |
 
 Completion callbacks are delivered on the UI thread (EUI posts them to its main
 queue), so the worker never touches `state()`.
@@ -57,6 +57,10 @@ AppState
 │   └─ ImageEntry: path, decoded pixels, stream, altStream, gpuImage,
 │                  zoom/pan (clamped), rotation, selection + statistics,
 │                  histogram, EXIF, cached overlay text (exifLines, statsLines)
+├─ diffMode, diffThreshold  computed third tile, 0..20 threshold
+├─ diffImage                RGBA8 diff tile (not in `images`)
+├─ diffSerial / diffRequest*  worker generation and current pair key
+├─ diffSliderDragStart      toolbar slider drag anchor
 ├─ zoom / qSwapActive / move source+target
 ├─ soloId, peekId            solo view
 ├─ localMode, showExif, showHistogram
@@ -90,9 +94,16 @@ ImView menu / sidebar double click / command line
         │                        ImageEntry (pixels; first compose uploads
         │                        the external texture, streams stay as fallback)
         ▼
-   compose() → composeGrid / composeSidebar / composeToolbar /
-               composeContextMenu / composeAboutDialog
+   compose() → updateDiffImage → composeGrid / composeSidebar /
+               composeToolbar / composeContextMenu / composeAboutDialog
 ```
+
+Diff mode sits beside the image pipeline: `updateDiffImage()` compares the pair
+and restarts an `imview.diff` worker whenever the two image ids or the threshold
+change. The result is stored in `AppState::diffImage`, which is rendered as an
+extra layout cell but never added to `images`. `addPaths` and `removeImage` call
+`enforceDiffMode()` so any grid change that leaves a count other than two exits
+the mode; review pair switching passes `preserveDiff` to `addPaths`.
 
 Review mode drives the same path: `openReviewPair(n)` clears the grid and calls
 `addPaths` with the two files of pair `n`, left folder first.

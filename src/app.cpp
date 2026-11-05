@@ -218,7 +218,22 @@ struct ImageEntry {
 
 struct AppState {
     std::vector<ImageEntry> images;
-    int nextId = 1;    // Shared view state.
+    int nextId = 1;
+    // Diff mode: a computed third image from the two grid images. It is kept
+    // outside `images`, so it never counts towards the four-image cap and does
+    // not change the review-mode rules. `diffMode` may survive a review pair
+    // switch even when that pair has fewer than two images.
+    bool diffMode = false;
+    float diffThreshold = 5.0f; // 0..20, in 8-bit channel steps
+    float diffSliderDragStart = 5.0f;
+    ImageEntry diffImage;
+    int diffSerial = 0;
+    int diffRequestLeftId = -1;
+    int diffRequestRightId = -1;
+    const void* diffRequestLeftPixels = nullptr;
+    const void* diffRequestRightPixels = nullptr;
+    float diffRequestThreshold = -1.0f;
+    // Shared view state.
     float zoom = 1.0f; // 1x = image fully fits its cell
     bool qSwapActive = false; // Q held: right image covers the left cell
     // Move mode: the move button arms a cell, the next clicked cell swaps with
@@ -377,6 +392,69 @@ ImageEntry* findEntry(int id) {
     return nullptr;
 }
 
+bool diffVisible() {
+    return state().diffMode && state().images.size() == 2;
+}
+
+// Drops the computed pixels but leaves the mode and request bookkeeping alone.
+void resetDiffImageData() {
+    ImageEntry& diff = state().diffImage;
+    diff.pixels.reset();
+    diff.width = 0;
+    diff.height = 0;
+    diff.loaded = false;
+    diff.failed = false;
+    diff.streamPrimed = false;
+    diff.panX = 0.0f;
+    diff.panY = 0.0f;
+    diff.maxPanX = 0.0f;
+    diff.maxPanY = 0.0f;
+    diff.rotation = 0;
+    diff.gpuImage.reset();
+    diff.gpuRevision = 0;
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+    diff.gpuSource.reset();
+#endif
+}
+
+void clearDiffImage() {
+    ++state().diffSerial;
+    state().diffRequestLeftId = -1;
+    state().diffRequestRightId = -1;
+    state().diffRequestLeftPixels = nullptr;
+    state().diffRequestRightPixels = nullptr;
+    state().diffRequestThreshold = -1.0f;
+    resetDiffImageData();
+    state().diffImage.loading = false;
+}
+
+void exitDiffMode() {
+    if (!state().diffMode) return;
+    state().diffMode = false;
+    clearDiffImage();
+    app::requestUpdate();
+}
+
+void toggleDiffMode() {
+    if (state().diffMode) {
+        exitDiffMode();
+        return;
+    }
+    if (state().images.size() != 2) return;
+    state().diffMode = true;
+    state().diffImage.id = -1;
+    if (!state().diffImage.stream) {
+        state().diffImage.stream = std::make_shared<eui::ImageStream>(1);
+    }
+    app::requestUpdate();
+}
+
+// Every grid change funnels through this: the only way to stay in diff mode is
+// to still have exactly two images.
+void enforceDiffMode() {
+    if (state().diffMode && state().images.size() != 2) exitDiffMode();
+}
+
 // Pushes the decoded frame into one of an entry's mailboxes. Streams are
 // single-shot, so a stream is only refilled right before it is drawn again.
 void submitFrame(const ImageEntry& entry, const std::shared_ptr<eui::ImageStream>& stream) {
@@ -501,6 +579,10 @@ void resetPans() {
         entry.panX = 0.0f;
         entry.panY = 0.0f;
     }
+    if (state().diffMode) {
+        state().diffImage.panX = 0.0f;
+        state().diffImage.panY = 0.0f;
+    }
 }
 
 // Applies one pan step. Because the stored offset is clamped right here, any
@@ -515,6 +597,7 @@ void panAllBy(float deltaX, float deltaY) {
     for (auto& entry : state().images) {
         panBy(entry, deltaX, deltaY);
     }
+    if (diffVisible()) panBy(state().diffImage, deltaX, deltaY);
 }
 
 // Returns the image id whose cell contains the given logical point. Hover
@@ -533,7 +616,8 @@ int cellAt(float x, float y) {
 
 // Defined further down (image loading pipeline). `fromSidebar` marks additions
 // driven by the sidebar itself, which must not hide the sidebar.
-void addPaths(const std::vector<std::string>& paths, bool fromSidebar = false);
+void addPaths(const std::vector<std::string>& paths, bool fromSidebar = false,
+              bool preserveDiff = false);
 void clearSelections();
 
 bool isImagePath(const std::string& path) {
@@ -905,7 +989,9 @@ void openReviewPair(int index) {
     if (pair < static_cast<int>(folders[0].paths.size())) selected.push_back({0, pair});
     if (pair < static_cast<int>(folders[1].paths.size())) selected.push_back({1, pair});
 
-    addPaths(paths);
+    // Review pair switching is the one mutation allowed to keep diff mode even
+    // though the grid is replaced; ordinary opens re-check the two-image rule.
+    addPaths(paths, false, true);
     revealReviewPair();
 }
 
@@ -1312,6 +1398,7 @@ void removeImage(int id) {
         state().localMode = false;
         clearSelections();
     }
+    enforceDiffMode();
     app::requestUpdate();
 }
 
@@ -1446,7 +1533,7 @@ void startLoad(const std::string& path) {
     }
 }
 
-void addPaths(const std::vector<std::string>& paths, bool fromSidebar) {
+void addPaths(const std::vector<std::string>& paths, bool fromSidebar, bool preserveDiff) {
     std::vector<std::string> accepted;
     for (const std::string& path : paths) {
         // A directory argument opens the sidebar instead of a grid cell.
@@ -1470,6 +1557,7 @@ void addPaths(const std::vector<std::string>& paths, bool fromSidebar) {
         accepted.push_back(path);
     }
     for (const std::string& path : accepted) startLoad(path);
+    if (!preserveDiff) enforceDiffMode();
     if (!accepted.empty()) {
         // Opening images dismisses the sidebar; opening a folder brings it back.
         // Additions made from the sidebar itself keep it visible, and review
@@ -1583,6 +1671,183 @@ void openImages() {
     options.allowMultiple = true;
     const eui::platform::FileDialogResult result = eui::platform::openFileDialog(options);
     if (result.selected()) addPaths(result.paths);
+}
+
+// --- diff image ---------------------------------------------------------------
+
+struct DiffImageResult {
+    std::shared_ptr<std::vector<std::uint8_t>> pixels;
+    int width = 0;
+    int height = 0;
+};
+
+// Right minus left, one pixel at a time. The channel with the largest absolute
+// difference decides the sign, so a pure colour shift still shows up even when
+// the luminance stays the same. The two source images are sampled into a common
+// canvas with nearest-neighbour sampling; identical sizes map 1:1.
+bool buildDiffImage(const std::vector<std::uint8_t>& left, int leftWidth, int leftHeight,
+                    const std::vector<std::uint8_t>& right, int rightWidth, int rightHeight,
+                    float threshold, const async::CancelToken& token,
+                    DiffImageResult& result) {
+    const int width = std::max(leftWidth, rightWidth);
+    const int height = std::max(leftHeight, rightHeight);
+    if (width <= 0 || height <= 0 || leftWidth <= 0 || leftHeight <= 0 ||
+        rightWidth <= 0 || rightHeight <= 0) {
+        return false;
+    }
+
+    result.width = width;
+    result.height = height;
+    result.pixels = std::make_shared<std::vector<std::uint8_t>>(
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
+    auto& output = *result.pixels;
+
+    const auto sampleX = [](int x, int outWidth, int sourceWidth) {
+        return std::min(sourceWidth - 1,
+                        static_cast<int>(static_cast<long long>(x) * sourceWidth / outWidth));
+    };
+    const auto sampleY = [](int y, int outHeight, int sourceHeight) {
+        return std::min(sourceHeight - 1,
+                        static_cast<int>(static_cast<long long>(y) * sourceHeight / outHeight));
+    };
+
+    // Three-state map: right brighter by more than the threshold (blue), left
+    // brighter by more than the threshold (red), otherwise unchanged (grey).
+    constexpr std::uint8_t kBlue[3] = {0x2F, 0x81, 0xF7};
+    constexpr std::uint8_t kRed[3] = {0xE5, 0x53, 0x4B};
+    constexpr std::uint8_t kGrey[3] = {0x6E, 0x6E, 0x6E};
+
+    for (int y = 0; y < height; ++y) {
+        // Threshold edits restart the task; abort promptly so stale work cannot
+        // pile up behind the slider.
+        if (y % 32 == 0 && token.canceled()) return false;
+        const int leftY = sampleY(y, height, leftHeight);
+        const int rightY = sampleY(y, height, rightHeight);
+        const std::uint8_t* leftRow = left.data() +
+            static_cast<std::size_t>(leftY) * static_cast<std::size_t>(leftWidth) * 4u;
+        const std::uint8_t* rightRow = right.data() +
+            static_cast<std::size_t>(rightY) * static_cast<std::size_t>(rightWidth) * 4u;
+        std::uint8_t* outputRow = output.data() +
+            static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 4u;
+
+        for (int x = 0; x < width; ++x) {
+            const int leftX = sampleX(x, width, leftWidth);
+            const int rightX = sampleX(x, width, rightWidth);
+            const std::uint8_t* leftPixel = leftRow + static_cast<std::size_t>(leftX) * 4u;
+            const std::uint8_t* rightPixel = rightRow + static_cast<std::size_t>(rightX) * 4u;
+            const int deltaR = static_cast<int>(rightPixel[0]) - static_cast<int>(leftPixel[0]);
+            const int deltaG = static_cast<int>(rightPixel[1]) - static_cast<int>(leftPixel[1]);
+            const int deltaB = static_cast<int>(rightPixel[2]) - static_cast<int>(leftPixel[2]);
+            int strongest = deltaR;
+            if (std::max(deltaG, -deltaG) > std::max(strongest, -strongest)) {
+                strongest = deltaG;
+            }
+            if (std::max(deltaB, -deltaB) > std::max(strongest, -strongest)) {
+                strongest = deltaB;
+            }
+
+            const std::uint8_t* colour = kGrey;
+            if (static_cast<float>(strongest) > threshold) {
+                colour = kBlue;
+            } else if (static_cast<float>(strongest) < -threshold) {
+                colour = kRed;
+            }
+            std::uint8_t* pixel = outputRow + static_cast<std::size_t>(x) * 4u;
+            pixel[0] = colour[0];
+            pixel[1] = colour[1];
+            pixel[2] = colour[2];
+            pixel[3] = 255;
+        }
+    }
+    return true;
+}
+
+// Starts a worker rebuild whenever the pair or the threshold changed. The
+// image is not part of `images`; it lives in AppState::diffImage.
+void updateDiffImage() {
+    AppState& app = state();
+    if (!app.diffMode || app.images.size() != 2) return;
+    ImageEntry& left = app.images[0];
+    ImageEntry& right = app.images[1];
+
+    const bool samePair = app.diffRequestLeftId == left.id &&
+                          app.diffRequestRightId == right.id &&
+                          app.diffRequestLeftPixels == left.pixels.get() &&
+                          app.diffRequestRightPixels == right.pixels.get();
+    if (!left.loaded || !right.loaded || !left.pixels || !right.pixels) {
+        if (!samePair) {
+            ++app.diffSerial; // invalidate an in-flight build for another pair
+            // Remember the pair while its images decode; the threshold marker
+            // stays invalid so the build starts as soon as both are loaded.
+            app.diffRequestLeftId = left.id;
+            app.diffRequestRightId = right.id;
+            app.diffRequestLeftPixels = left.pixels.get();
+            app.diffRequestRightPixels = right.pixels.get();
+            app.diffRequestThreshold = -1.0f;
+            resetDiffImageData();
+            app.diffImage.loading = true;
+        }
+        return;
+    }
+    if (samePair && app.diffRequestThreshold == app.diffThreshold) return;
+
+    const int serial = ++app.diffSerial;
+    app.diffRequestLeftId = left.id;
+    app.diffRequestRightId = right.id;
+    app.diffRequestLeftPixels = left.pixels.get();
+    app.diffRequestRightPixels = right.pixels.get();
+    app.diffRequestThreshold = app.diffThreshold;
+    if (!samePair) {
+        resetDiffImageData();
+        app.diffImage.loading = true;
+    }
+
+    const std::shared_ptr<std::vector<std::uint8_t>> leftPixels = left.pixels;
+    const std::shared_ptr<std::vector<std::uint8_t>> rightPixels = right.pixels;
+    const int leftWidth = left.width;
+    const int leftHeight = left.height;
+    const int rightWidth = right.width;
+    const int rightHeight = right.height;
+    const float threshold = app.diffThreshold;
+
+    async::restart(
+        "imview.diff",
+        [leftPixels, leftWidth, leftHeight, rightPixels, rightWidth, rightHeight,
+         threshold](const async::CancelToken& token) -> async::Result<DiffImageResult> {
+            DiffImageResult result;
+            if (!buildDiffImage(*leftPixels, leftWidth, leftHeight,
+                                *rightPixels, rightWidth, rightHeight,
+                                threshold, token, result)) {
+                return async::failure<DiffImageResult>("diff canceled or empty");
+            }
+            return async::success(std::move(result));
+        },
+        [serial](const async::Result<DiffImageResult>& result) {
+            AppState& app = state();
+            if (serial != app.diffSerial || !app.diffMode) return;
+            ImageEntry& diff = app.diffImage;
+            diff.loading = false;
+            if (!result.ok) {
+                diff.failed = true;
+                diff.loaded = false;
+                app::requestUpdate();
+                return;
+            }
+            diff.pixels = result.value.pixels;
+            diff.width = result.value.width;
+            diff.height = result.value.height;
+            diff.loaded = true;
+            diff.failed = false;
+            diff.streamPrimed = false;
+            diff.gpuImage.reset();
+            diff.gpuRevision = 0;
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+            diff.gpuSource.reset();
+#endif
+            submitFrame(diff, diff.stream);
+            diff.streamPrimed = true;
+            app::requestUpdate();
+        });
 }
 
 // --- compose -------------------------------------------------------------------
@@ -1736,6 +2001,84 @@ void composeWindowButton(eui::Ui& ui, const std::string& id, float x, float y,
     }).build();
 }
 
+// Diff threshold control in the title bar: label, slider and value. The track
+// and knob are drawn directly so the whole band is one drag surface; the native
+// `components::slider` stays out of the toolbar because its nested hit target
+// sits inside the window's caption band.
+void composeDiffThresholdSlider(eui::Ui& ui, float x, float y) {
+    constexpr float kHeight = 20.0f;
+    constexpr float kLabelWidth = 28.0f;
+    constexpr float kSliderWidth = 120.0f;
+    constexpr float kValueWidth = 28.0f;
+    constexpr float kGap = 4.0f;
+    constexpr float kWidth =
+        kLabelWidth + kGap + kSliderWidth + kGap + kValueWidth;
+    constexpr float kTrackHeight = 4.0f;
+    constexpr float kKnobSize = 12.0f;
+    const float value = std::clamp(state().diffThreshold / 20.0f, 0.0f, 1.0f);
+    const float trackY = (kHeight - kTrackHeight) * 0.5f;
+    const float knobX = value * (kSliderWidth - kKnobSize);
+
+    ui.stack("toolbar.diff").position(x, y).size(kWidth, kHeight).content([&] {
+        ui.text("toolbar.diff.label").position(0.0f, 0.0f)
+            .size(kLabelWidth, kHeight).text("Diff")
+            .color(kTextSecondary).fontSize(11.0f)
+            .verticalAlign(eui::VerticalAlign::Center).build();
+
+        const float sliderX = kLabelWidth + kGap;
+        ui.rect("toolbar.diff.track")
+            .position(snapToPixel(sliderX), snapToPixel(trackY))
+            .size(kSliderWidth, kTrackHeight)
+            .color({1.0f, 1.0f, 1.0f, 0.16f})
+            .radius(kTrackHeight * 0.5f).build();
+        if (value > 0.0f) {
+            ui.rect("toolbar.diff.fill")
+                .position(snapToPixel(sliderX), snapToPixel(trackY))
+                .size(std::max(kTrackHeight, kSliderWidth * value), kTrackHeight)
+                .color(kAccent).radius(kTrackHeight * 0.5f).build();
+        }
+        ui.rect("toolbar.diff.knob")
+            .position(snapToPixel(sliderX + knobX),
+                      snapToPixel((kHeight - kKnobSize) * 0.5f))
+            .size(kKnobSize, kKnobSize).radius(kKnobSize * 0.5f)
+            .color(kTextPrimary).build();
+
+        ui.text("toolbar.diff.value")
+            .position(sliderX + kSliderWidth + kGap, 0.0f)
+            .size(kValueWidth, kHeight)
+            .text(std::to_string(static_cast<int>(std::lround(state().diffThreshold))))
+            .color(kTextPrimary).fontSize(11.0f)
+            .horizontalAlign(eui::HorizontalAlign::Right)
+            .verticalAlign(eui::VerticalAlign::Center).build();
+
+        ui.rect("toolbar.diff.hit")
+            .position(sliderX, 0.0f).size(kSliderWidth, kHeight)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .acceptedButtons(eui::PointerButton::Left)
+            .onPress([](const core::PointerEvent& event, const core::Rect& bounds) {
+                if (event.button != eui::PointerButton::Left) return;
+                const float fraction = bounds.width > 0.0f
+                    ? std::clamp((static_cast<float>(event.x) - bounds.x) / bounds.width,
+                                 0.0f, 1.0f)
+                    : 0.0f;
+                state().diffThreshold = fraction * 20.0f;
+                state().diffSliderDragStart = state().diffThreshold;
+                app::requestUpdate();
+            })
+            .onDrag([](const core::dsl::DragEvent& event) {
+                const float scale = imview::frame::dpiScale();
+                const float delta = scale > 0.0f
+                    ? static_cast<float>(event.totalX) / scale
+                    : static_cast<float>(event.totalX);
+                state().diffThreshold = std::clamp(
+                    state().diffSliderDragStart + delta / 120.0f * 20.0f, 0.0f, 20.0f);
+                app::requestUpdate();
+            })
+            .cursor(eui::CursorShape::Hand)
+            .build();
+    }).build();
+}
+
 void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
     const int count = static_cast<int>(state().images.size());
     const float controlHeight = 24.0f;
@@ -1764,6 +2107,7 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
     if (state().showExif) appendMode("EXIF");
     if (state().showHistogram) appendMode("Histogram");
     if (state().localMode) appendMode("Local");
+    if (state().diffMode) appendMode("Diff");
     if (!modes.empty()) {
         if (!status.empty()) status += "  \xc2\xb7  ";
         status += modes;
@@ -1808,6 +2152,14 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
                                  [] { openToolbarMenu(); });
             }).build();
 
+        // Diff mode grows its threshold slider next to the menu; the window
+        // frame widens the left control cluster while it is visible so the bar
+        // can drag normally.
+        if (state().diffMode) {
+            composeDiffThresholdSlider(ui, 82.0f,
+                                       (kToolbarHeight - 20.0f) * 0.5f);
+        }
+
         // Centre: status indicator.
         if (!status.empty()) {
             ui.text("toolbar.status").position(screen.width * 0.5f - 170.0f, 0.0f)
@@ -1845,6 +2197,10 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
                               state().showExif = !state().showExif;
                               app::requestUpdate();
                           });
+        right -= 2.0f + chipSize;
+        composeToggleChip(ui, "toolbar.chip.d", right, centerY, chipSize, "D",
+                          state().diffMode, [] { toggleDiffMode(); },
+                          state().images.size() == 2 || state().diffMode);
 
         // Window buttons, right-most in the bar (full height, VS Code style).
         float windowX = screen.width - 3.0f * winButton;
@@ -2336,6 +2692,106 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
     }).build();
 }
 
+// The computed diff tile. It renders like a third image but has no close or
+// move handle, and it never joins the local-mode selection or EXIF overlays.
+// Wheel zoom and pan still act together with the two source images.
+void composeDiffCell(eui::Ui& ui, float x, float y, float width, float height) {
+    ImageEntry& entry = state().diffImage;
+    const std::string id = "diff";
+    const float border = crispLine(kCellBorderWidth);
+    const float innerX = border;
+    const float innerY = border;
+    const float innerWidth = std::max(1.0f, width - 2.0f * border);
+    const float innerHeight = std::max(1.0f, height - 2.0f * border);
+
+    panLimits(entry, innerWidth, innerHeight, entry.maxPanX, entry.maxPanY);
+    entry.panX = std::clamp(entry.panX, -entry.maxPanX, entry.maxPanX);
+    entry.panY = std::clamp(entry.panY, -entry.maxPanY, entry.maxPanY);
+
+    float offsetX = 0.0f;
+    float offsetY = 0.0f;
+    displayOffset(entry, innerWidth, innerHeight, offsetX, offsetY);
+    DisplayRect shown = displayRect(entry, innerWidth, innerHeight);
+    shown.x += innerX;
+    shown.y += innerY;
+
+    bool useGpuImage = false;
+#if defined(EUI_RENDER_BACKEND_OPENGL)
+    useGpuImage = ensureGpuImage(entry, state().zoom > 1.0f);
+    if (useGpuImage) entry.streamPrimed = false;
+#endif
+    if (!useGpuImage && !entry.streamPrimed && entry.loaded) {
+        submitFrame(entry, entry.stream);
+        entry.streamPrimed = true;
+    }
+
+    ui.stack(id).position(x, y).size(width, height).clip().content([&] {
+        ui.rect(id + ".bg").size(width, height).color(kPanel)
+            .border(border, kBorder).build();
+
+        if (entry.loaded) {
+            auto image = ui.image(id + ".img");
+            image.position(innerX, innerY)
+                .size(innerWidth, innerHeight)
+                .fit(eui::ImageFit::Contain)
+                .transformOrigin(0.5f, 0.5f)
+                .scale(state().zoom, state().zoom)
+                .translate(offsetX, offsetY);
+            if (useGpuImage) {
+                image.texture(entry.gpuImage, entry.gpuRevision);
+            } else {
+                image.stream(entry.stream);
+            }
+            image.build();
+        }
+
+        if (entry.loaded) {
+            const std::string badge =
+                "Diff  " + std::to_string(static_cast<int>(std::lround(state().diffThreshold)));
+            const float textWidth = core::TextPrimitive::measureTextWidth(
+                badge, {}, 10.0f, 400);
+            const float badgeWidth = std::min(width - 16.0f, 6.0f + textWidth);
+            ui.rect(id + ".badge.bg").position(8.0f, 8.0f)
+                .size(badgeWidth, 14.0f)
+                .color({0.0f, 0.0f, 0.0f, 0.6f}).build();
+            ui.text(id + ".badge").position(11.0f, 8.0f)
+                .size(std::max(0.0f, badgeWidth - 4.0f), 14.0f)
+                .text(badge).color(kWhite).fontSize(10.0f).build();
+        } else if (entry.failed) {
+            ui.text(id + ".status").size(width, height).text("Diff unavailable")
+                .color(kError).fontSize(12.0f)
+                .horizontalAlign(eui::HorizontalAlign::Center)
+                .verticalAlign(eui::VerticalAlign::Center).build();
+        } else {
+            ui.text(id + ".status").size(width, height).text("Computing diff...")
+                .color(kTextSecondary).fontSize(12.0f)
+                .horizontalAlign(eui::HorizontalAlign::Center)
+                .verticalAlign(eui::VerticalAlign::Center).build();
+        }
+
+        ui.rect(id + ".hit").size(width, height)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .acceptedButtons(eui::PointerButton::Left | eui::PointerButton::Right)
+            .onDrag([](const core::dsl::DragEvent& event) {
+                if (!panEnabled()) return;
+                if (event.button == eui::PointerButton::Left) {
+                    panAllBy(static_cast<float>(event.deltaX),
+                             static_cast<float>(event.deltaY));
+                } else if (event.button == eui::PointerButton::Right) {
+                    panBy(state().diffImage, static_cast<float>(event.deltaX),
+                          static_cast<float>(event.deltaY));
+                }
+                app::requestUpdate();
+            })
+            .onScroll([](const core::ScrollEvent& event) {
+                if (!zoomEnabled() || event.y == 0.0) return;
+                applyZoom(static_cast<float>(std::pow(1.1, event.y)));
+            })
+            .cursor(eui::CursorShape::Arrow)
+            .build();
+    }).build();
+}
+
 // Keeps an image's GPU texture alive while another one is shown full size.
 //
 // The image stream is a one-shot mailbox: once the framework has consumed the
@@ -2389,8 +2845,12 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
         }
     }
 
-    const int cols = count == 1 ? 1 : 2;
-    const int rows = (count + cols - 1) / cols;
+    // Diff mode adds one computed tile. It is counted only for layout here, not
+    // in AppState::images, so the four-image cap and review pair stay unchanged.
+    const bool showDiff = state().diffMode && count == 2;
+    const int layoutCount = count + (showDiff ? 1 : 0);
+    const int cols = layoutCount == 1 ? 1 : 2;
+    const int rows = (layoutCount + cols - 1) / cols;
     const float cellWidth = floorToPixel((availableWidth - gap * (cols - 1)) / cols);
     const float cellHeight = floorToPixel((availableHeight - gap * (rows - 1)) / rows);
     const float totalHeight = rows * cellHeight + (rows - 1) * gap;
@@ -2404,18 +2864,22 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
         leftCoverSource = &state().images[1];
     }
 
-    for (int index = 0; index < count; ++index) {
+    for (int index = 0; index < layoutCount; ++index) {
         const int row = index / cols;
         const int col = index % cols;
-        const int cellsInRow = std::min(cols, count - row * cols);
+        const int cellsInRow = std::min(cols, layoutCount - row * cols);
         const float rowWidth = cellsInRow * cellWidth + (cellsInRow - 1) * gap;
         const float x = snapToPixel(left + margin + (availableWidth - rowWidth) * 0.5f +
                                     col * (cellWidth + gap));
         const float y = snapToPixel(y0 + row * (cellHeight + gap));
-        composeCell(ui, state().images[static_cast<std::size_t>(index)],
-                    x, y, cellWidth, cellHeight,
-                    index == 0 ? leftCover : nullptr,
-                    index == 0 ? leftCoverSource : nullptr);
+        if (index < count) {
+            composeCell(ui, state().images[static_cast<std::size_t>(index)],
+                        x, y, cellWidth, cellHeight,
+                        index == 0 ? leftCover : nullptr,
+                        index == 0 ? leftCoverSource : nullptr);
+        } else {
+            composeDiffCell(ui, x, y, cellWidth, cellHeight);
+        }
     }
 }
 
@@ -2896,6 +3360,12 @@ void composeDropHighlight(eui::Ui& ui, const eui::Screen& screen, float sidebarW
 // NOTE: must have external linkage; EUI's entry point calls it via
 // qualified name lookup from another translation unit.
 void compose(eui::Ui& ui, const eui::Screen& screen) {
+    // Refreshes the computed diff (pair or threshold changed) before the grid
+    // asks for its texture.
+    updateDiffImage();
+    // The threshold slider extends the left control cluster; without this the
+    // native caption band would swallow its drags.
+    imview::frame::setTitleBarLeftControlsWidth(state().diffMode ? 270.0f : 80.0f);
     const float sidebarWidth = sidebarWidthFor(screen.width);
     imview::frame::setSidebarSplitter(
         state().sidebarVisible && !state().menuOpen && !state().aboutOpen

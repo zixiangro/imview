@@ -70,6 +70,27 @@
 - With exactly two images, holding `Q` paints the right image over the left
   cell; releasing restores the left image. Display order is never changed.
 
+## Diff mode
+
+- The `D` chip is enabled with exactly two images. It adds a third tile below
+  the pair; the tile is not part of the image grid, so it neither counts towards
+  the four-image cap nor changes the review-mode rules.
+- The tile is a three-class map of `right - left`: for each pixel the channel
+  with the largest absolute difference decides the sign. Above the threshold
+  is blue, below the negative threshold is red, and everything inside is grey.
+  Images of different sizes are sampled into a common canvas.
+- The threshold slider at the left end of the title bar (next to the `ImView`
+  menu) sets the threshold from 0 to 20 in 8-bit channel steps; the default is
+  5. The value is shown to its right.
+- Diff mode exits automatically when an image add or remove leaves a count
+  other than two. Dropping two images onto a two-image diff grid exits the mode
+  first and then shows all four images normally.
+- Two operations keep diff mode: switching pairs in review mode, and the
+  sidebar's *Open* with exactly two selected rows. In both cases the tile is
+  recomputed from the new pair.
+- The diff tile follows the shared zoom and pan, but has no close/move buttons,
+  no rotation, no local-mode statistics, no EXIF overlay and no histogram.
+
 ## Local mode (region statistics)
 
 - `P` toggles local mode.

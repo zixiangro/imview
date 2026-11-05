@@ -27,6 +27,10 @@ void installBorderlessWindow(float titleBarLogicalHeight,
                              float leftControlsWidth,
                              float rightControlsWidth);
 
+// Updates only the left interactive cluster: the toolbar grows a slider in diff
+// mode, and that area must stop acting as a native drag band while it is shown.
+void setTitleBarLeftControlsWidth(float width);
+
 void minimizeWindow();
 void toggleMaximizeWindow();
 void closeWindow();

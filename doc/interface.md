@@ -18,16 +18,21 @@ least one device pixel wide instead of blurring across two.
 
 ```
 ┌────────┬──────────────────────────────────┬───────────────────────────────┐
-│ ImView │      2 / 4 · EXIF · 150%         │  [E][H][P] [R]  │  −  □  ✕    │
+│ ImView │      2 / 4 · Diff · 150%         │ [D][E][H][P] [R] │  −  □  ✕    │
 └────────┴──────────────────────────────────┴───────────────────────────────┘
 ```
 
 | Element | Position | Notes |
 |---|---|---|
 | `ImView` menu button | x = 8, w = 66 | Dropdown: Open images…, Open folder…, Toggle sidebar, About |
+| Diff slider | x = 82, w = 182 | Only while diff mode is on: `Diff` label, 120-wide track, value |
 | Status text | centred, 340 wide | Empty when nothing is shown |
-| Mode chips | right of centre | 24x24 each; `E`, `H`, `P`, `R` |
+| Mode chips | right of centre | 24x24 each; `D`, `E`, `H`, `P`, `R` |
 | Window buttons | right edge | 36 wide, full bar height |
+
+The left interactive cluster passed to the borderless frame is 80 wide normally
+and 270 while the diff slider is visible, so the slider receives client clicks
+instead of starting a native window drag.
 
 Status text contents, joined with `·`:
 
@@ -37,7 +42,7 @@ Status text contents, joined with `·`:
 | Solo | `2 / 4` |
 | Review | `Review 3 / 20` |
 | Review, single image pair | `Review 7 / 20  single` |
-| Active modes | `EXIF`, `Histogram`, `Local` |
+| Active modes | `Diff`, `EXIF`, `Histogram`, `Local` |
 | Zoom | `150%` (only above 100%) |
 
 Dragging any part of the bar that is not a control moves the window; the popup
@@ -51,6 +56,12 @@ menus temporarily disable that so their clicks are not swallowed.
 | Gap between cells | 2 |
 | Cell border | 1 px `#2B2B2B` |
 | Cell background | `#212121` |
+
+Diff mode lays out three equal cells: the two images on the first row and the
+computed diff tile centred on the second row. The tile uses the normal grid
+geometry and has a `Diff <threshold>` strip at its top-left. Its three colours
+are blue `#2F81F7` (right above threshold), red `#E5534B` (left above threshold)
+and grey `#6E6E6E` (inside the threshold).
 
 ## Drop feedback
 
