@@ -5,7 +5,7 @@ single window, inspect the same region across all of them numerically, browse
 folders in a sidebar, and step through two folders pair by pair in review mode.
 
 Built with C++17 on [EUI-NEO](https://github.com/sudoevolve/EUI-NEO) with a
-custom borderless window in the VS Code "Dark Modern" style. Version 0.1.1 is a
+custom borderless window in the VS Code "Dark Modern" style. Version 0.1.2 is a
 preview; the shipped artifact is a single self-contained `imview.exe`.
 
 ## Features
