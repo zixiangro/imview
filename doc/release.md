@@ -50,12 +50,12 @@ git submodule status          # e.g. 1f62d333... 3rd/EUI-NEO (v0.6.2)
 folder (binary, notices, licence texts):
 
 ```sh
-cmake --install build --prefix dist/imview-0.1.2-win64
-cd dist && zip -r imview-0.1.2-win64.zip imview-0.1.2-win64
+cmake --install build --prefix dist/imview-0.1.3-win64
+cd dist && zip -r imview-0.1.3-win64.zip imview-0.1.3-win64
 ```
 
 ```text
-imview-0.1.2-win64/
+imview-0.1.3-win64/
 ├─ imview.exe
 ├─ LICENSE                     (Unlicense, applies to ImView itself)
 ├─ THIRD-PARTY-NOTICES.md
@@ -79,7 +79,7 @@ row to `3rd/THIRD-PARTY-NOTICES.md` and one `install(FILES ...)` line.
 | Check | Command |
 |---|---|
 | Logic tests | `ctest --output-on-failure` in `build/` passes |
-| Version resource | right-click → Properties → Details shows `0.1.2` |
+| Version resource | right-click → Properties → Details shows `0.1.3` |
 | No icon | the exe has none yet (the project has not picked one) |
 | Runs from an empty directory | copy only `imview.exe` somewhere and start it |
 | Chinese paths | open a folder with Chinese names; the sidebar must render them |
