@@ -19,10 +19,12 @@ preview; the shipped artifact is a single self-contained `imview.exe`.
 - **Solo view** — double-click a cell to see it full size; hold `1`–`4` to peek at
   another image on top of it.
 - **Two-image compare** — hold `Q` to paint the right image over the left cell.
-- **Diff mode** — with exactly two images, the `D` chip adds a third tile that
-  maps right-minus-left differences to blue/red over a grey background. A
-  title-bar slider sets the threshold (0–20, default 5). The diff tile is not a
-  grid image: it does not count towards the four-image cap.
+- **Diff mode** — with exactly two decoded images of equal pixel size, the `D`
+  chip adds a third tile. Identical pixels are grey, differences inside the
+  tolerance are blue and larger differences are red; the tile blends both
+  sources with that class colour. A title-bar slider sets the tolerance (0–20,
+  default 5). The tile is not a grid image: it does not count towards the
+  four-image cap.
 - **Local mode** — drag a rectangle and read the average `Luma`, `R/G`, `B/G`,
   `Sat`, `R`, `G`, `B` of that region on every image. A single click measures
   exactly one pixel.

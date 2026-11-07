@@ -392,8 +392,21 @@ ImageEntry* findEntry(int id) {
     return nullptr;
 }
 
+// Diff needs two decoded images with identical pixel dimensions. Mismatched
+// sizes are rejected instead of being resampled into a common canvas.
+bool diffPairReady() {
+    const auto& images = state().images;
+    if (images.size() != 2) return false;
+    const ImageEntry& left = images[0];
+    const ImageEntry& right = images[1];
+    return left.loaded && right.loaded && !left.failed && !right.failed &&
+           left.pixels && right.pixels && left.width > 0 && left.height > 0 &&
+           right.width > 0 && right.height > 0 &&
+           left.width == right.width && left.height == right.height;
+}
+
 bool diffVisible() {
-    return state().diffMode && state().images.size() == 2;
+    return state().diffMode && diffPairReady();
 }
 
 // Drops the computed pixels but leaves the mode and request bookkeeping alone.
@@ -440,7 +453,7 @@ void toggleDiffMode() {
         exitDiffMode();
         return;
     }
-    if (state().images.size() != 2) return;
+    if (!diffPairReady()) return;
     state().diffMode = true;
     state().diffImage.id = -1;
     if (!state().diffImage.stream) {
@@ -450,9 +463,22 @@ void toggleDiffMode() {
 }
 
 // Every grid change funnels through this: the only way to stay in diff mode is
-// to still have exactly two images.
+// to still have exactly two decoded images with matching dimensions. While a
+// new pair is still loading the mode survives; a failed decode or a size
+// mismatch ends it as soon as the outcome is known.
 void enforceDiffMode() {
-    if (state().diffMode && state().images.size() != 2) exitDiffMode();
+    if (!state().diffMode) return;
+    const auto& images = state().images;
+    if (images.size() != 2) {
+        exitDiffMode();
+        return;
+    }
+    const ImageEntry& left = images[0];
+    const ImageEntry& right = images[1];
+    const bool bothDecoded = left.loaded && right.loaded;
+    if (left.failed || right.failed || (bothDecoded && !diffPairReady())) {
+        exitDiffMode();
+    }
 }
 
 // Pushes the decoded frame into one of an entry's mailboxes. Streams are
@@ -1522,6 +1548,9 @@ void startLoad(const std::string& path) {
             } else {
                 entry->failed = true;
             }
+            // A failed decode, or a pair that finished loading with mismatched
+            // dimensions, leaves diff mode; a partially loaded pair stays.
+            enforceDiffMode();
             app::requestUpdate();
         });
 
@@ -1529,6 +1558,7 @@ void startLoad(const std::string& path) {
         if (ImageEntry* queued = findEntry(id)) {
             queued->loading = false;
             queued->failed = true;
+            enforceDiffMode();
         }
     }
 }
@@ -1681,81 +1711,67 @@ struct DiffImageResult {
     int height = 0;
 };
 
-// Right minus left, one pixel at a time. The channel with the largest absolute
-// difference decides the sign, so a pure colour shift still shows up even when
-// the luminance stays the same. The two source images are sampled into a common
-// canvas with nearest-neighbour sampling; identical sizes map 1:1.
+// One pixel at a time, with no resampling: the two decoded images must have the
+// same dimensions. The per-pixel class is chosen by the largest absolute channel
+// difference (grey for identical pixels, blue inside the tolerance, red above
+// it), then blended 25% left, 25% right and 50% class colour.
 bool buildDiffImage(const std::vector<std::uint8_t>& left, int leftWidth, int leftHeight,
                     const std::vector<std::uint8_t>& right, int rightWidth, int rightHeight,
                     float threshold, const async::CancelToken& token,
                     DiffImageResult& result) {
-    const int width = std::max(leftWidth, rightWidth);
-    const int height = std::max(leftHeight, rightHeight);
-    if (width <= 0 || height <= 0 || leftWidth <= 0 || leftHeight <= 0 ||
-        rightWidth <= 0 || rightHeight <= 0) {
+    if (leftWidth <= 0 || leftHeight <= 0 || leftWidth != rightWidth ||
+        leftHeight != rightHeight) {
+        return false;
+    }
+    const int width = leftWidth;
+    const int height = leftHeight;
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (left.size() < pixelCount * 4u || right.size() < pixelCount * 4u) {
         return false;
     }
 
     result.width = width;
     result.height = height;
-    result.pixels = std::make_shared<std::vector<std::uint8_t>>(
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u);
+    result.pixels = std::make_shared<std::vector<std::uint8_t>>(pixelCount * 4u);
     auto& output = *result.pixels;
 
-    const auto sampleX = [](int x, int outWidth, int sourceWidth) {
-        return std::min(sourceWidth - 1,
-                        static_cast<int>(static_cast<long long>(x) * sourceWidth / outWidth));
-    };
-    const auto sampleY = [](int y, int outHeight, int sourceHeight) {
-        return std::min(sourceHeight - 1,
-                        static_cast<int>(static_cast<long long>(y) * sourceHeight / outHeight));
-    };
-
-    // Three-state map: right brighter by more than the threshold (blue), left
-    // brighter by more than the threshold (red), otherwise unchanged (grey).
     constexpr std::uint8_t kBlue[3] = {0x2F, 0x81, 0xF7};
     constexpr std::uint8_t kRed[3] = {0xE5, 0x53, 0x4B};
     constexpr std::uint8_t kGrey[3] = {0x6E, 0x6E, 0x6E};
+    const auto blend = [](int leftValue, int rightValue, int colourValue) {
+        return static_cast<std::uint8_t>(
+            (5 * leftValue + 5 * rightValue + 10 * colourValue + 10) / 20);
+    };
 
     for (int y = 0; y < height; ++y) {
         // Threshold edits restart the task; abort promptly so stale work cannot
         // pile up behind the slider.
         if (y % 32 == 0 && token.canceled()) return false;
-        const int leftY = sampleY(y, height, leftHeight);
-        const int rightY = sampleY(y, height, rightHeight);
         const std::uint8_t* leftRow = left.data() +
-            static_cast<std::size_t>(leftY) * static_cast<std::size_t>(leftWidth) * 4u;
+            static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 4u;
         const std::uint8_t* rightRow = right.data() +
-            static_cast<std::size_t>(rightY) * static_cast<std::size_t>(rightWidth) * 4u;
+            static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 4u;
         std::uint8_t* outputRow = output.data() +
             static_cast<std::size_t>(y) * static_cast<std::size_t>(width) * 4u;
 
         for (int x = 0; x < width; ++x) {
-            const int leftX = sampleX(x, width, leftWidth);
-            const int rightX = sampleX(x, width, rightWidth);
-            const std::uint8_t* leftPixel = leftRow + static_cast<std::size_t>(leftX) * 4u;
-            const std::uint8_t* rightPixel = rightRow + static_cast<std::size_t>(rightX) * 4u;
+            const std::uint8_t* leftPixel = leftRow + static_cast<std::size_t>(x) * 4u;
+            const std::uint8_t* rightPixel = rightRow + static_cast<std::size_t>(x) * 4u;
             const int deltaR = static_cast<int>(rightPixel[0]) - static_cast<int>(leftPixel[0]);
             const int deltaG = static_cast<int>(rightPixel[1]) - static_cast<int>(leftPixel[1]);
             const int deltaB = static_cast<int>(rightPixel[2]) - static_cast<int>(leftPixel[2]);
-            int strongest = deltaR;
-            if (std::max(deltaG, -deltaG) > std::max(strongest, -strongest)) {
-                strongest = deltaG;
-            }
-            if (std::max(deltaB, -deltaB) > std::max(strongest, -strongest)) {
-                strongest = deltaB;
-            }
+            const int strongest =
+                std::max({std::abs(deltaR), std::abs(deltaG), std::abs(deltaB)});
 
             const std::uint8_t* colour = kGrey;
-            if (static_cast<float>(strongest) > threshold) {
-                colour = kBlue;
-            } else if (static_cast<float>(strongest) < -threshold) {
-                colour = kRed;
+            if (strongest != 0) {
+                colour = static_cast<float>(strongest) <= threshold ? kBlue : kRed;
             }
             std::uint8_t* pixel = outputRow + static_cast<std::size_t>(x) * 4u;
-            pixel[0] = colour[0];
-            pixel[1] = colour[1];
-            pixel[2] = colour[2];
+            pixel[0] = blend(leftPixel[0], rightPixel[0], colour[0]);
+            pixel[1] = blend(leftPixel[1], rightPixel[1], colour[1]);
+            pixel[2] = blend(leftPixel[2], rightPixel[2], colour[2]);
             pixel[3] = 255;
         }
     }
@@ -1774,7 +1790,12 @@ void updateDiffImage() {
                           app.diffRequestRightId == right.id &&
                           app.diffRequestLeftPixels == left.pixels.get() &&
                           app.diffRequestRightPixels == right.pixels.get();
-    if (!left.loaded || !right.loaded || !left.pixels || !right.pixels) {
+    if (left.failed || right.failed ||
+        (left.loaded && right.loaded && !diffPairReady())) {
+        exitDiffMode();
+        return;
+    }
+    if (!diffPairReady()) {
         if (!samePair) {
             ++app.diffSerial; // invalidate an in-flight build for another pair
             // Remember the pair while its images decode; the threshold marker
@@ -2200,7 +2221,7 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
         right -= 2.0f + chipSize;
         composeToggleChip(ui, "toolbar.chip.d", right, centerY, chipSize, "D",
                           state().diffMode, [] { toggleDiffMode(); },
-                          state().images.size() == 2 || state().diffMode);
+                          diffPairReady() || state().diffMode);
 
         // Window buttons, right-most in the bar (full height, VS Code style).
         float windowX = screen.width - 3.0f * winButton;
@@ -2611,20 +2632,28 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
         ui.rect(id + ".bg").size(width, height).color(kPanel)
             .border(border, kBorder)
             .build();
-        auto image = ui.image(id + ".img");
-        image.position(innerX, innerY)
+        // The viewport is the untransformed clip frame; only the image moves
+        // inside it, so its id and stream mailbox survive every pan/zoom step.
+        ui.stack(id + ".viewport")
+            .position(innerX, innerY)
             .size(innerWidth, innerHeight)
-            .fit(eui::ImageFit::Contain)
-            .transformOrigin(0.5f, 0.5f)
-            .scale(zoom, zoom)
-            .rotate(static_cast<float>(entry.rotation) * 1.5707963f)
-            .translate(offsetX, offsetY);
-        if (useGpuImage) {
-            image.texture(source.gpuImage, source.gpuRevision);
-        } else {
-            image.stream(streamOverride ? streamOverride : source.stream);
-        }
-        image.build();
+            .clip()
+            .content([&] {
+                auto image = ui.image(id + ".img");
+                image.position(0.0f, 0.0f)
+                    .size(innerWidth, innerHeight)
+                    .fit(eui::ImageFit::Contain)
+                    .transformOrigin(0.5f, 0.5f)
+                    .scale(zoom, zoom)
+                    .rotate(static_cast<float>(entry.rotation) * 1.5707963f)
+                    .translate(offsetX, offsetY);
+                if (useGpuImage) {
+                    image.texture(source.gpuImage, source.gpuRevision);
+                } else {
+                    image.stream(streamOverride ? streamOverride : source.stream);
+                }
+                image.build();
+            }).build();
         if (moveSource || moveTarget) {
             ui.rect(id + ".move.frame").size(width, height)
                 .color(moveTarget ? eui::Color{0.0f, 0.471f, 0.831f, 0.18f}
@@ -2730,19 +2759,27 @@ void composeDiffCell(eui::Ui& ui, float x, float y, float width, float height) {
             .border(border, kBorder).build();
 
         if (entry.loaded) {
-            auto image = ui.image(id + ".img");
-            image.position(innerX, innerY)
+            // Same untransformed viewport as the normal cells: the border and
+            // the input layer stay outside, only the image is clipped here.
+            ui.stack(id + ".viewport")
+                .position(innerX, innerY)
                 .size(innerWidth, innerHeight)
-                .fit(eui::ImageFit::Contain)
-                .transformOrigin(0.5f, 0.5f)
-                .scale(state().zoom, state().zoom)
-                .translate(offsetX, offsetY);
-            if (useGpuImage) {
-                image.texture(entry.gpuImage, entry.gpuRevision);
-            } else {
-                image.stream(entry.stream);
-            }
-            image.build();
+                .clip()
+                .content([&] {
+                    auto image = ui.image(id + ".img");
+                    image.position(0.0f, 0.0f)
+                        .size(innerWidth, innerHeight)
+                        .fit(eui::ImageFit::Contain)
+                        .transformOrigin(0.5f, 0.5f)
+                        .scale(state().zoom, state().zoom)
+                        .translate(offsetX, offsetY);
+                    if (useGpuImage) {
+                        image.texture(entry.gpuImage, entry.gpuRevision);
+                    } else {
+                        image.stream(entry.stream);
+                    }
+                    image.build();
+                }).build();
         }
 
         if (entry.loaded) {
@@ -2826,8 +2863,8 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
     const int count = static_cast<int>(state().images.size());
     const float top = kToolbarHeight;
     const float left = state().sidebarVisible ? sidebarWidthFor(screen.width) : 0.0f;
-    const float availableWidth = floorToPixel(screen.width - left - margin * 2.0f);
-    const float availableHeight = floorToPixel(screen.height - top - margin * 2.0f);
+    const float availableWidth = screen.width - left - margin * 2.0f;
+    const float availableHeight = screen.height - top - margin * 2.0f;
 
     // Solo mode: the current (or peeked) image fills the whole grid area.
     if (soloActive()) {
@@ -2840,7 +2877,8 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
                 }
             }
             composeCell(ui, *shown, snapToPixel(left + margin),
-                        snapToPixel(top + margin), availableWidth, availableHeight);
+                        snapToPixel(top + margin),
+                        floorToPixel(availableWidth), floorToPixel(availableHeight));
             return;
         }
     }
@@ -3341,17 +3379,20 @@ void composeDropHighlight(eui::Ui& ui, const eui::Screen& screen, float sidebarW
         x = sidebarWidth;
         width -= sidebarWidth;
     }
-    const float frameX = x + kSideInset;
-    const float frameY = kToolbarHeight + kTopInset;
+    // Align the origin first, then derive the bottom edge from the aligned
+    // top so the frame never drifts by the rounding difference.
+    const float frameX = snapToPixel(x + kSideInset);
+    const float frameY = snapToPixel(kToolbarHeight + kTopInset);
     const float frameWidth = width - kSideInset * 2.0f;
     const float frameHeight = screen.height - kSideInset - frameY;
+    const float lineWidth = crispLine(2.0f);
     if (frameWidth <= 0.0f || frameHeight <= 0.0f) return;
     ui.rect("drop.highlight")
-        .position(snapToPixel(frameX), snapToPixel(frameY))
+        .position(frameX, frameY)
         .size(floorToPixel(frameWidth), floorToPixel(frameHeight))
         .zIndex(62)
         .color({0.0f, 0.0f, 0.0f, 0.0f})
-        .border(crispLine(2.0f), kAccent)
+        .border(lineWidth, kAccent)
         .build();
 }
 

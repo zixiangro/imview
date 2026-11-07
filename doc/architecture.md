@@ -100,10 +100,14 @@ ImView menu / sidebar double click / command line
 
 Diff mode sits beside the image pipeline: `updateDiffImage()` compares the pair
 and restarts an `imview.diff` worker whenever the two image ids or the threshold
-change. The result is stored in `AppState::diffImage`, which is rendered as an
-extra layout cell but never added to `images`. `addPaths` and `removeImage` call
-`enforceDiffMode()` so any grid change that leaves a count other than two exits
-the mode; review pair switching passes `preserveDiff` to `addPaths`.
+change. `diffPairReady()` requires two decoded images with matching pixel
+dimensions; the worker rejects mismatched sizes instead of resampling them. The
+result is stored in `AppState::diffImage`, which is rendered as an extra layout
+cell but never added to `images`. `addPaths`, `removeImage` and decode
+completion call `enforceDiffMode()`, which exits the mode for any count other
+than two, a failed decode, or a completed pair with mismatched dimensions;
+review pair switching passes `preserveDiff` to `addPaths` so the mode can
+survive while the new pair loads.
 
 Review mode drives the same path: `openReviewPair(n)` clears the grid and calls
 `addPaths` with the two files of pair `n`, left folder first.

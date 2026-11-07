@@ -41,13 +41,14 @@ the other three edges.
 
 | Input | Condition | Action |
 |---|---|---|
-| `D` chip | Exactly two images | Enter or leave diff mode |
+| `D` chip | Two decoded images of equal pixel size | Enter or leave diff mode |
 | Drag the threshold slider | Diff mode | Set the threshold from 0 to 20 (default 5) |
 | Click the threshold track | Diff mode | Jump to that threshold and start dragging from it |
 
 Diff mode leaves automatically when an add or remove operation leaves a count
-other than two. Review pair changes and the sidebar's *Open* with exactly two
-selected rows keep it on.
+other than two, when an image fails to decode, or when the two images have
+different pixel sizes. Review pair changes and the sidebar's *Open* with exactly
+two selected rows keep it on while the new pair loads.
 
 ## Solo view
 

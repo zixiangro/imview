@@ -60,8 +60,8 @@ menus temporarily disable that so their clicks are not swallowed.
 Diff mode lays out three equal cells: the two images on the first row and the
 computed diff tile centred on the second row. The tile uses the normal grid
 geometry and has a `Diff <threshold>` strip at its top-left. Its three colours
-are blue `#2F81F7` (right above threshold), red `#E5534B` (left above threshold)
-and grey `#6E6E6E` (inside the threshold).
+are blue `#2F81F7` (within the tolerance), red `#E5534B` (outside it) and grey
+`#6E6E6E` (identical pixels).
 
 ## Drop feedback
 
