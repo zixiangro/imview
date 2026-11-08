@@ -4,6 +4,7 @@
 #include "utf8.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 #include <string>
 #include <utility>
@@ -109,9 +110,17 @@ bool gMaximized = false;
 bool gTitleBarDragEnabled = true;
 bool gCustomTitleBarDrag = false;
 bool gCustomDragging = false;
+// A press on a maximized window is not a drag yet; restoring is deferred until
+// the pointer moves past the system drag threshold.
+bool gCustomDragRestorePending = false;
 RECT gRestoreRect{};
 RECT gCustomDragStartRect{};
 POINT gCustomDragStartCursor{};
+// Double-click matching for the app-driven title bar (see
+// titleBarDoubleClick).
+bool gTitleBarPressSeen = false;
+DWORD gLastTitleBarPressTime = 0;
+POINT gLastTitleBarPressPoint{};
 
 // Private message: convert a system-initiated maximize into ours.
 constexpr UINT kConvertMaximizeMessage = WM_APP + 0x51;
@@ -364,11 +373,40 @@ bool customTitleBarHit(HWND hwnd, LPARAM lParam) {
     return hit;
 }
 
+// GLFW's window class does not include CS_DBLCLKS, and with a video the title
+// band is reported as client area, so Windows never sends WM_LBUTTONDBLCLK
+// there. Match double clicks against the system interval and rectangle.
+bool titleBarDoubleClick(HWND hwnd, LPARAM lParam) {
+    POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    if (!ClientToScreen(hwnd, &point)) return false;
+    const DWORD now = static_cast<DWORD>(GetMessageTime());
+    const DWORD elapsed = now - gLastTitleBarPressTime;
+    const int halfWidth = std::max(GetSystemMetrics(SM_CXDOUBLECLK) / 2, 1);
+    const int halfHeight = std::max(GetSystemMetrics(SM_CYDOUBLECLK) / 2, 1);
+    const bool again =
+        gTitleBarPressSeen && elapsed <= static_cast<DWORD>(GetDoubleClickTime()) &&
+        std::abs(point.x - gLastTitleBarPressPoint.x) <= halfWidth &&
+        std::abs(point.y - gLastTitleBarPressPoint.y) <= halfHeight;
+    if (again) {
+        gTitleBarPressSeen = false;
+        return true;
+    }
+    gTitleBarPressSeen = true;
+    gLastTitleBarPressTime = now;
+    gLastTitleBarPressPoint = point;
+    return false;
+}
+
 LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_LBUTTONDOWN:
             if (customTitleBarHit(hwnd, lParam)) {
-                beginWindowMove();
+                if (titleBarDoubleClick(hwnd, lParam)) {
+                    endWindowMove();
+                    applyMaximized(!(gMaximized || IsZoomed(hwnd) != FALSE));
+                } else {
+                    beginWindowMove();
+                }
                 return 0;
             }
             break;
@@ -380,6 +418,8 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             break;
         case WM_LBUTTONDBLCLK:
             if (customTitleBarHit(hwnd, lParam)) {
+                gTitleBarPressSeen = false;
+                endWindowMove();
                 applyMaximized(!(gMaximized || IsZoomed(hwnd) != FALSE));
                 return 0;
             }
@@ -555,7 +595,10 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
 #endif
 
 void setCustomTitleBarDrag(bool custom) {
-    gCustomTitleBarDrag = custom;
+    if (gCustomTitleBarDrag != custom) {
+        gCustomTitleBarDrag = custom;
+        gTitleBarPressSeen = false;
+    }
     if (!custom && gCustomDragging) endWindowMove();
 }
 
@@ -563,9 +606,9 @@ void beginWindowMove() {
 #if defined(_WIN32)
     HWND hwnd = nativeWindow();
     if (hwnd == nullptr) return;
-    if (gMaximized || IsZoomed(hwnd) != FALSE) {
-        applyMaximized(false);
-    }
+    // Keep a maximized window maximized until the pointer actually moves; a
+    // plain click and the first half of a double-click must not restore it.
+    gCustomDragRestorePending = gMaximized || IsZoomed(hwnd) != FALSE;
     GetWindowRect(hwnd, &gCustomDragStartRect);
     GetCursorPos(&gCustomDragStartCursor);
     gCustomDragging = true;
@@ -580,6 +623,17 @@ void dragWindowToCursor() {
     if (hwnd == nullptr) return;
     POINT cursor{};
     if (!GetCursorPos(&cursor)) return;
+    if (gCustomDragRestorePending) {
+        const int dragX = std::max(GetSystemMetrics(SM_CXDRAG), 1);
+        const int dragY = std::max(GetSystemMetrics(SM_CYDRAG), 1);
+        if (std::abs(cursor.x - gCustomDragStartCursor.x) < dragX &&
+            std::abs(cursor.y - gCustomDragStartCursor.y) < dragY) {
+            return;
+        }
+        gCustomDragRestorePending = false;
+        applyMaximized(false);
+        if (!GetWindowRect(hwnd, &gCustomDragStartRect)) return;
+    }
     const int dx = cursor.x - gCustomDragStartCursor.x;
     const int dy = cursor.y - gCustomDragStartCursor.y;
     SetWindowPos(hwnd, nullptr,
@@ -596,6 +650,7 @@ void endWindowMove() {
         ReleaseCapture();
         gCustomDragging = false;
     }
+    gCustomDragRestorePending = false;
 #endif
 }
 

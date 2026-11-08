@@ -224,7 +224,7 @@ and performs no work while the pointer is away from the seek bar.
 | `WM_SIZE` | Convert a system maximise into the app's own geometry |
 | `WM_SETCURSOR` | Horizontal-resize cursor over the sidebar splitter |
 | `WM_ENTERSIZEMOVE` | Restore a maximised window before dragging |
-| `WM_LBUTTONDOWN/MOUSEMOVE/LBUTTONUP` | With a video, drive a client-side title-bar drag so UI frames keep composing |
+| `WM_LBUTTONDOWN/MOUSEMOVE/LBUTTONUP` | With a video, drive a client-side title-bar drag so UI frames keep composing; presses in the drag band are also matched into double clicks against the system interval |
 | `WM_LBUTTONDBLCLK` | Maximise/restore in the client-side drag mode |
 | `DwmSetWindowAttribute` | Square corners and no native border line while maximised |
 | `SetWindowRgn` | Full-window region while maximised, so DWM cannot reveal the desktop at rounded corners |
