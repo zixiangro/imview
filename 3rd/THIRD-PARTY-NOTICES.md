@@ -19,6 +19,7 @@ was built.
 | [glad](https://glad.dav1d.de/) | 0.1.34 (generated) | generated output of glad; `khrplatform.h` is Khronos MIT-style | `3rd/EUI-NEO/3rd/glad/src/glad.c`, `3rd/EUI-NEO/3rd/glad/include/KHR/khrplatform.h` |
 | [stb_image](https://github.com/nothings/stb) | 2.30 | public domain / MIT (dual) | header of `3rd/EUI-NEO/3rd/stb_image.h` |
 | [miniaudio](https://miniaud.io/) | 0.11.21 | public domain / MIT-0 (dual) | header of `3rd/EUI-NEO/3rd/miniaudio.h` |
+| [FFmpeg](https://ffmpeg.org/) | 9.0.2 (`3rd/ffmpeg` submodule) | LGPL-2.1-or-later | `3rd/ffmpeg/COPYING.LGPLv2.1` |
 
 EUI-NEO is used unmodified, so no "changes" statement is required beyond the
 configuration flags listed in `CMakeLists.txt`. Its `NOTICE` file, if present,
@@ -27,6 +28,14 @@ ships with it.
 ImView itself, including everything in `src/`, is released into the public
 domain under the [Unlicense](../LICENSE); it is not covered by the licences
 above.
+
+FFmpeg is linked statically with only the libraries and components listed in
+`tools/build_ffmpeg.sh` (video, audio and text-subtitle demuxers/decoders,
+including the sidecar subtitle demuxers, and libswresample/libswscale). Its
+complete corresponding source is the pinned
+`3rd/ffmpeg` submodule; the same script reproduces the object files and static
+libraries used to link `imview.exe`, which is the relinking path required by the
+LGPL when distributing a statically linked binary.
 
 ## Not redistributed
 

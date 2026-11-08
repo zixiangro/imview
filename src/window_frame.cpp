@@ -107,7 +107,11 @@ void applyMaximizedRegion(HWND hwnd, bool maximized) {
 // for zoomed windows. Maximizing is done by resizing to the monitor work area.
 bool gMaximized = false;
 bool gTitleBarDragEnabled = true;
+bool gCustomTitleBarDrag = false;
+bool gCustomDragging = false;
 RECT gRestoreRect{};
+RECT gCustomDragStartRect{};
+POINT gCustomDragStartCursor{};
 
 // Private message: convert a system-initiated maximize into ours.
 constexpr UINT kConvertMaximizeMessage = WM_APP + 0x51;
@@ -130,6 +134,32 @@ float scaleFor(HWND hwnd) {
 }
 
 FileDropHandler gFileDropHandler;
+HANDLE gStartupMutex = nullptr;
+
+using OpenPathsHandler = std::function<bool(const std::vector<std::string>&)>;
+OpenPathsHandler gOpenPathsHandler;
+
+constexpr wchar_t kInstanceProperty[] = L"ImView.Instance.Window";
+constexpr ULONG_PTR kOpenPathsCopyData = 0x494D5649; // 'IMVI'
+
+std::vector<std::string> parseOpenPaths(const COPYDATASTRUCT& data) {
+    std::vector<std::string> paths;
+    if (data.lpData == nullptr || data.cbData < sizeof(wchar_t)) return paths;
+    const auto* text = static_cast<const wchar_t*>(data.lpData);
+    const std::size_t length = data.cbData / sizeof(wchar_t);
+    std::size_t start = 0;
+    while (start < length) {
+        std::size_t end = start;
+        while (end < length && text[end] != L'\n' && text[end] != L'\0') ++end;
+        if (end > start) {
+            std::wstring line(text + start, end - start);
+            std::string path = imview::utf8::narrow(line.c_str());
+            if (!path.empty()) paths.push_back(std::move(path));
+        }
+        start = end + 1;
+    }
+    return paths;
+}
 
 // OLE drop target, registered on the borderless window. It receives drag-over
 // notifications that the GLFW/Win32 drop callback does not provide, so the
@@ -321,8 +351,60 @@ void applyMaximized(bool maximize) {
     }
 }
 
+bool customTitleBarHit(HWND hwnd, LPARAM lParam) {
+    if (!gTitleBarDragEnabled || !gCustomTitleBarDrag) return false;
+    RECT client{};
+    if (!GetClientRect(hwnd, &client)) return false;
+    const float scale = scaleFor(hwnd);
+    const float x = static_cast<float>(GET_X_LPARAM(lParam)) / scale;
+    const float y = static_cast<float>(GET_Y_LPARAM(lParam)) / scale;
+    const float width = static_cast<float>(client.right) / scale;
+    const bool hit = y >= 0.0f && y < gTitleBarHeight &&
+           x > gLeftControlsWidth && x < width - gControlsWidth;
+    return hit;
+}
+
 LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        case WM_LBUTTONDOWN:
+            if (customTitleBarHit(hwnd, lParam)) {
+                beginWindowMove();
+                return 0;
+            }
+            break;
+        case WM_NCLBUTTONDOWN:
+            if (gCustomTitleBarDrag && wParam == HTCAPTION) {
+                beginWindowMove();
+                return 0;
+            }
+            break;
+        case WM_LBUTTONDBLCLK:
+            if (customTitleBarHit(hwnd, lParam)) {
+                applyMaximized(!(gMaximized || IsZoomed(hwnd) != FALSE));
+                return 0;
+            }
+            break;
+        case WM_MOUSEMOVE:
+            if (gCustomDragging) {
+                dragWindowToCursor();
+                return 0;
+            }
+            break;
+        case WM_LBUTTONUP:
+            if (gCustomDragging) {
+                endWindowMove();
+                return 0;
+            }
+            break;
+        case WM_COPYDATA: {
+            const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+            if (data != nullptr && data->dwData == kOpenPathsCopyData) {
+                if (!gOpenPathsHandler) return FALSE;
+                const std::vector<std::string> paths = parseOpenPaths(*data);
+                return gOpenPathsHandler(paths) ? TRUE : FALSE;
+            }
+            break;
+        }
         case WM_NCCALCSIZE:
             // Claim the whole window as client area: the frame we added for the
             // native move/size loops must not be drawn.
@@ -334,7 +416,25 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
         case WM_NCHITTEST: {
             const LRESULT result =
                 CallWindowProcW(gPreviousProc, hwnd, message, wParam, lParam);
-            if (result != HTCLIENT) {
+            if (gCustomTitleBarDrag) {
+                RECT window{};
+                if (GetWindowRect(hwnd, &window)) {
+                    const float scale = scaleFor(hwnd);
+                    const int top = GET_Y_LPARAM(lParam) - window.top;
+                    const int border = static_cast<int>(kResizeBorder * scale);
+                    const int titleHeight =
+                        static_cast<int>(gTitleBarHeight * scale);
+                    if (top >= border && top < titleHeight) {
+                        return HTCLIENT;
+                    }
+                }
+            }
+            // The previous proc may report HTCAPTION for the caption band even
+            // though WM_NCCALCSIZE made it client area. When the app drives the
+            // drag itself, turn that band into a normal client hit so EUI
+            // receives press/drag/release while video frames keep composing.
+            if (result != HTCLIENT &&
+                !(gCustomTitleBarDrag && result == HTCAPTION)) {
                 return result;
             }
             RECT window{};
@@ -370,11 +470,15 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             // move loop (drag, Aero Snap). The control clusters at both ends
             // keep receiving normal client clicks. Kept active while maximized so
             // double-click still toggles.
+            if (gCustomTitleBarDrag && result == HTCAPTION) {
+                return HTCLIENT;
+            }
             const int titleHeight = static_cast<int>(gTitleBarHeight * scale);
             const int controlsStart =
                 (window.right - window.left) - static_cast<int>(gControlsWidth * scale);
             const int leftControlsEnd = static_cast<int>(gLeftControlsWidth * scale);
-            if (gTitleBarDragEnabled && top < titleHeight && left > leftControlsEnd &&
+            if (gTitleBarDragEnabled && !gCustomTitleBarDrag &&
+                top < titleHeight && left > leftControlsEnd &&
                 left < controlsStart) {
                 return HTCAPTION;
             }
@@ -450,6 +554,51 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
 } // namespace
 #endif
 
+void setCustomTitleBarDrag(bool custom) {
+    gCustomTitleBarDrag = custom;
+    if (!custom && gCustomDragging) endWindowMove();
+}
+
+void beginWindowMove() {
+#if defined(_WIN32)
+    HWND hwnd = nativeWindow();
+    if (hwnd == nullptr) return;
+    if (gMaximized || IsZoomed(hwnd) != FALSE) {
+        applyMaximized(false);
+    }
+    GetWindowRect(hwnd, &gCustomDragStartRect);
+    GetCursorPos(&gCustomDragStartCursor);
+    gCustomDragging = true;
+    SetCapture(hwnd);
+#endif
+}
+
+void dragWindowToCursor() {
+#if defined(_WIN32)
+    if (!gCustomDragging) return;
+    HWND hwnd = nativeWindow();
+    if (hwnd == nullptr) return;
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) return;
+    const int dx = cursor.x - gCustomDragStartCursor.x;
+    const int dy = cursor.y - gCustomDragStartCursor.y;
+    SetWindowPos(hwnd, nullptr,
+                 gCustomDragStartRect.left + dx,
+                 gCustomDragStartRect.top + dy,
+                 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+#endif
+}
+
+void endWindowMove() {
+#if defined(_WIN32)
+    if (gCustomDragging) {
+        ReleaseCapture();
+        gCustomDragging = false;
+    }
+#endif
+}
+
 void installBorderlessWindow(float titleBarLogicalHeight,
                              float leftControlsWidth,
                              float rightControlsWidth) {
@@ -459,6 +608,7 @@ void installBorderlessWindow(float titleBarLogicalHeight,
 #if defined(_WIN32)
     HWND hwnd = nativeWindow();
     if (hwnd == nullptr) return;
+    SetPropW(hwnd, kInstanceProperty, reinterpret_cast<HANDLE>(1));
 
     if (!gHookInstalled) {
         gPreviousProc = reinterpret_cast<WNDPROC>(
@@ -562,6 +712,121 @@ void setFileDropHandler(FileDropHandler handler) {
     gFileDropHandler = std::move(handler);
 #else
     (void)handler;
+#endif
+}
+
+void setOpenPathsHandler(std::function<bool(const std::vector<std::string>&)> handler) {
+#if defined(_WIN32)
+    gOpenPathsHandler = std::move(handler);
+#else
+    (void)handler;
+#endif
+}
+
+bool forwardOpenPaths(const std::vector<std::string>& paths) {
+#if defined(_WIN32)
+    if (paths.empty()) return false;
+    std::wstring payload;
+    for (const std::string& path : paths) {
+        const std::wstring wide = imview::utf8::widen(path);
+        if (wide.empty()) continue;
+        if (!payload.empty()) payload.push_back(L'\n');
+        payload += wide;
+    }
+    if (payload.empty()) return false;
+
+    struct Context {
+        const std::wstring* payload = nullptr;
+        bool forwarded = false;
+    };
+    Context context{&payload, false};
+    EnumWindows([](HWND hwnd, LPARAM opaque) -> BOOL {
+        auto* context = reinterpret_cast<Context*>(opaque);
+        if (GetPropW(hwnd, kInstanceProperty) == nullptr) return TRUE;
+        DWORD_PTR result = 0;
+        COPYDATASTRUCT message{};
+        message.dwData = kOpenPathsCopyData;
+        message.cbData = static_cast<DWORD>(context->payload->size() * sizeof(wchar_t));
+        message.lpData = const_cast<wchar_t*>(context->payload->data());
+        const LRESULT sent = SendMessageTimeoutW(
+            hwnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&message),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK, 2000, &result);
+        if (sent != 0 && result != 0) {
+            if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+            context->forwarded = true;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&context));
+    return context.forwarded;
+#else
+    (void)paths;
+    return false;
+#endif
+}
+
+void shutdownWindowMessaging() {
+#if defined(_WIN32)
+    gOpenPathsHandler = nullptr;
+    if (HWND hwnd = nativeWindow()) {
+        RemovePropW(hwnd, kInstanceProperty);
+    }
+#endif
+}
+
+void lockInstanceStartup() {
+#if defined(_WIN32)
+    if (gStartupMutex != nullptr) return;
+    gStartupMutex = CreateMutexW(nullptr, FALSE, L"Local\\ImView.Instance.Startup");
+    if (gStartupMutex != nullptr) {
+        WaitForSingleObject(gStartupMutex, 3000);
+    }
+#endif
+}
+
+void unlockInstanceStartup() {
+#if defined(_WIN32)
+    if (gStartupMutex == nullptr) return;
+    ReleaseMutex(gStartupMutex);
+    CloseHandle(gStartupMutex);
+    gStartupMutex = nullptr;
+#endif
+}
+
+void* nativeWindowHandle() {
+#if defined(_WIN32)
+    return nativeWindow();
+#else
+    return nullptr;
+#endif
+}
+
+void activateWindow() {
+#if defined(_WIN32)
+    HWND hwnd = nativeWindow();
+    if (hwnd == nullptr) return;
+    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+    SetForegroundWindow(hwnd);
+    BringWindowToTop(hwnd);
+#endif
+}
+
+bool cursorLogicalPosition(float& x, float& y) {
+#if defined(_WIN32)
+    HWND hwnd = nativeWindow();
+    if (hwnd == nullptr) return false;
+    POINT point{};
+    if (!GetCursorPos(&point)) return false;
+    if (!ScreenToClient(hwnd, &point)) return false;
+    const float scale = scaleFor(hwnd);
+    x = scale > 0.0f ? static_cast<float>(point.x) / scale : static_cast<float>(point.x);
+    y = scale > 0.0f ? static_cast<float>(point.y) / scale : static_cast<float>(point.y);
+    return true;
+#else
+    (void)x;
+    (void)y;
+    return false;
 #endif
 }
 

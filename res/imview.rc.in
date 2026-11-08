@@ -22,7 +22,7 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "FileDescription",  "ImView image comparison viewer"
+            VALUE "FileDescription",  "ImView image and video viewer"
             VALUE "FileVersion",      "@PROJECT_VERSION@"
             VALUE "InternalName",     "imview"
             VALUE "OriginalFilename", "imview.exe"

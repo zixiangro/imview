@@ -46,7 +46,8 @@ UTF-8 and reports phases and logical client coordinates through
   destination;
 - return `DROPEFFECT_COPY` or `DROPEFFECT_NONE`, which also selects the shell's
   copy/no-drop cursor;
-- add image files to the grid or folders to the sidebar on drop.
+- add image files to the grid, open a dropped video, or add folders to the
+  sidebar on drop.
 
 **Migration.** Public drag-enter / drag-over / drag-leave / drop handlers with
 client coordinates and file paths would replace the OLE target and the

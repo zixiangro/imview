@@ -1,8 +1,8 @@
 # ImView
 
-A desktop image comparison viewer built on [EUI-NEO](../3rd/EUI-NEO). It shows up to
-four images side by side, compares regions of them numerically, and browses two
-folders with a paired review mode.
+A desktop image and video viewer built on [EUI-NEO](../3rd/EUI-NEO). It shows up
+to four media cells, compares image regions numerically, plays videos with
+audio/subtitles, and browses two folders with a paired review mode.
 
 ## Documents
 
@@ -17,6 +17,8 @@ folders with a paired review mode.
 
 ## Scope
 
-- Desktop only, single window, local files.
-- Up to four images in one grid.
-- No editing, saving, exporting, video, or network features.
+- Desktop only, local files.
+- Up to four images and/or videos in one grid.
+- One window normally, additional windows when Explorer opens media into a full
+  workspace or no window exists.
+- No editing, saving, exporting or network features.

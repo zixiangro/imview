@@ -43,6 +43,15 @@ void centerWindow();
 // open, dragging must be suppressed so clicks reach the UI and dismiss it.
 void setTitleBarDragEnabled(bool enabled);
 
+// When a video is playing, the native Windows move loop would freeze the
+// rendered frame while the decoder keeps running. Use an app-driven drag in
+// that case: the toolbar drag surface calls begin/drag/end and the UI loop keeps
+// compositing frames. Native dragging stays in use for image-only windows.
+void setCustomTitleBarDrag(bool custom);
+void beginWindowMove();
+void dragWindowToCursor();
+void endWindowMove();
+
 // File drag-and-drop. EUI-NEO has no drop API, so the application installs an
 // OLE drop target on its own window and receives the phases here. Coordinates
 // are logical client units; paths arrive in UTF-8. The handler returns true only
@@ -63,6 +72,24 @@ using FileDropHandler = std::function<bool(const FileDropEvent&)>;
 
 void setFileDropHandler(FileDropHandler handler);
 void shutdownFileDrop();
+
+// Single-instance support. Windows opened by ImView carry a window property;
+// a second process forwards its media paths through WM_COPYDATA and the handler
+// returns true only when this window has room for them.
+void setOpenPathsHandler(std::function<bool(const std::vector<std::string>&)> handler);
+bool forwardOpenPaths(const std::vector<std::string>& paths);
+void shutdownWindowMessaging();
+
+// Serializes startup just long enough for the first window to register its
+// instance property before another process decides to forward or create a new
+// window.
+void lockInstanceStartup();
+void unlockInstanceStartup();
+
+// The native window handle (HWND on Windows), or nullptr before creation.
+void* nativeWindowHandle();
+void activateWindow();
+bool cursorLogicalPosition(float& x, float& y);
 
 // Logical x coordinate of the sidebar splitter's grab band. While the pointer
 // is over that band the window shows the horizontal-resize cursor. Pass a

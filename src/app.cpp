@@ -1,14 +1,20 @@
-// ImView - minimal dark image comparison viewer built on EUI-NEO.
-// Current scope: up to 4 images in a 2x2 grid, async decode + display.
+// ImView - minimal dark image and video viewer built on EUI-NEO.
+// Images use the 2x2 grid; video uses a separate plain playback view.
 
 #include "eui_neo.h"
 #include "eui/async.h"
 
 #include "exif.h"
+#include "media_paths.h"
 #include "shell_actions.h"
 #include "stb_wrap.h"
 #include "utf8.h"
+#include "video_player.h"
 #include "window_frame.h"
+
+#ifndef IMVIEW_ENABLE_VIDEO
+#define IMVIEW_ENABLE_VIDEO 1
+#endif
 
 #include "core/render/text.h"
 
@@ -30,7 +36,7 @@
 #endif
 
 #ifndef IMVIEW_VERSION
-#define IMVIEW_VERSION "0.1.3"
+#define IMVIEW_VERSION "0.2.0"
 #endif
 #ifndef IMVIEW_HOMEPAGE
 #define IMVIEW_HOMEPAGE "https://github.com/zixiangro/imview"
@@ -49,6 +55,9 @@
 
 namespace app {
 namespace {
+
+using imview::media::isImagePath;
+using imview::media::isVideoPath;
 
 constexpr int kMaxImages = 4;
 
@@ -171,6 +180,13 @@ struct ImageEntry {
     int id = 0;
     std::string path;
     std::string name;
+    bool isVideo = false;
+    std::shared_ptr<imview::video::Player> video;
+    bool progressPreviewActive = false;
+    bool videoControlsInteracting = false;
+    double progressPreviewTime = 0.0;
+    float progressPreviewFraction = 0.0f;
+    float progressDragStartFraction = 0.0f;
     std::shared_ptr<eui::ImageStream> stream;
     // Second mailbox holding the same frame, used when this image is drawn in
     // another cell (Q cover). Each stream can only be consumed once.
@@ -240,6 +256,20 @@ struct AppState {
     // it. Both cells are highlighted while the mode is armed.
     int moveSourceId = -1;
     int moveTargetId = -1;
+    // Video whose controls respond to keyboard shortcuts; set when the pointer
+    // enters its hot zone or one of its controls is pressed.
+    int activeVideoId = -1;
+    // One volume level for every video in this window. It is also copied into
+    // newly opened videos, so a fresh window starts at 50%.
+    float volume = 0.5f;
+    bool muted = false;
+    float volumeDragStart = 0.5f;
+    // Sync mode: only available for two or more videos and no images. It is
+    // entered paused and forwards transport commands to every video.
+    bool syncMode = false;
+    // Videos that have already reached the end and were handled by sync mode.
+    // They stay paused at the end while the rest of the group may resume.
+    std::vector<int> syncHandledEnded;
     // Solo mode: one image fills the grid (entered by double-clicking a cell).
     int soloId = -1;
     int peekId = -1; // image temporarily shown while holding another digit
@@ -251,6 +281,7 @@ struct AppState {
     };
     ClickTracker cellClick;
     ClickTracker rowClick;
+    ClickTracker titleClick;
     // Local mode (P4).
     bool localMode = false;
     bool showHistogram = false;
@@ -266,6 +297,7 @@ struct AppState {
         std::string dir;
         std::vector<std::string> paths;
         std::vector<std::string> names;
+        std::vector<bool> videos;
         float scroll = 0.0f;
         float listHeight = 0.0f; // cached list viewport, refreshed every compose
     };
@@ -296,8 +328,12 @@ struct AppState {
     float menuY = 0.0f;
     int menuPane = -1;
     int menuIndex = -1;
-    // About dialog.
+    // About dialog and on-demand Explorer integration.
     bool aboutOpen = false;
+    bool integrationImages = false;
+    bool integrationVideos = false;
+    bool integrationContextMenu = false;
+    bool integrationContextAvailable = false;
 };
 
 AppState& state() {
@@ -351,9 +387,18 @@ void setMenuOpen(bool open) {
     app::requestUpdate();
 }
 
+void refreshIntegrationStatus() {
+    const imview::shell::IntegrationStatus status = imview::shell::integrationStatus();
+    state().integrationImages = status.images;
+    state().integrationVideos = status.videos;
+    state().integrationContextMenu = status.contextMenu;
+    state().integrationContextAvailable = status.contextMenuAvailable;
+}
+
 void openAboutDialog() {
     state().menuOpen = false;
     state().aboutOpen = true;
+    refreshIntegrationStatus();
     syncTitleBarDrag();
     app::requestUpdate();
 }
@@ -362,6 +407,29 @@ void closeAboutDialog() {
     if (!state().aboutOpen) return;
     state().aboutOpen = false;
     syncTitleBarDrag();
+    app::requestUpdate();
+}
+
+void toggleImageIntegration() {
+    if (state().integrationImages) imview::shell::unregisterImageAssociations();
+    else imview::shell::registerImageAssociations();
+    refreshIntegrationStatus();
+    app::requestUpdate();
+}
+
+void toggleVideoIntegration() {
+    if (state().integrationVideos) imview::shell::unregisterVideoAssociations();
+    else imview::shell::registerVideoAssociations();
+    refreshIntegrationStatus();
+    app::requestUpdate();
+}
+
+void toggleContextMenuIntegration() {
+    if (state().integrationContextMenu) imview::shell::unregisterContextMenu();
+    else if (!imview::shell::registerContextMenu()) {
+        // The DLL is missing or could not be registered; leave the switch off.
+    }
+    refreshIntegrationStatus();
     app::requestUpdate();
 }
 
@@ -392,6 +460,215 @@ ImageEntry* findEntry(int id) {
     return nullptr;
 }
 
+bool hasVideoMedia() {
+    for (const auto& entry : state().images) {
+        if (entry.isVideo) return true;
+    }
+    return false;
+}
+
+bool hasImageMedia() {
+    for (const auto& entry : state().images) {
+        if (!entry.isVideo) return true;
+    }
+    return false;
+}
+
+bool mixedMedia() {
+    return hasVideoMedia() && hasImageMedia();
+}
+
+// Image tools stay available until a video enters the grid. Mixed media and
+// video-only grids grey the image tools out; removing the videos restores them.
+bool imageToolsEnabled() {
+    return !hasVideoMedia();
+}
+
+int activeVideoId() {
+    ImageEntry* active = findEntry(state().activeVideoId);
+    if (active != nullptr && active->isVideo) return active->id;
+    for (const auto& entry : state().images) {
+        if (entry.isVideo) return entry.id;
+    }
+    return -1;
+}
+
+int videoCount() {
+    int count = 0;
+    for (const auto& entry : state().images) {
+        if (entry.isVideo) ++count;
+    }
+    return count;
+}
+
+// Multiple videos may play together only in sync mode, and sync mode does not
+// mix with images. One video is always available for ordinary playback.
+bool syncAvailable() {
+    return videoCount() > 1 && !mixedMedia();
+}
+
+void pauseOtherVideos(int keepId) {
+    for (auto& entry : state().images) {
+        if (!entry.isVideo || entry.id == keepId || !entry.video) continue;
+        const imview::video::Status status = entry.video->status();
+        if (!status.failed && !status.paused) entry.video->togglePlayPause();
+    }
+}
+
+void pauseAllVideos() {
+    pauseOtherVideos(-1);
+}
+
+bool videoAtEnd(const imview::video::Status& status) {
+    return status.ended ||
+           (status.duration > 0.0 && status.position >= status.duration - 0.05);
+}
+
+void applyGlobalVolumeToPlayers() {
+    for (auto& entry : state().images) {
+        if (!entry.isVideo || !entry.video) continue;
+        entry.video->setVolume(state().volume);
+        entry.video->setMuted(state().muted);
+    }
+}
+
+// Default playback is exclusive: starting one video pauses every other video.
+// In sync mode a play/pause command applies to every video together.
+void toggleVideoPlayback(int id) {
+    ImageEntry* target = findEntry(id);
+    if (target == nullptr || !target->isVideo || !target->video) return;
+    const imview::video::Status targetStatus = target->video->status();
+    if (targetStatus.failed) return;
+    state().activeVideoId = id;
+
+    if (state().syncMode && syncAvailable()) {
+        const bool play = targetStatus.paused;
+        if (play) {
+            // If the end rule has not run yet, treat the videos already at the
+            // end as handled so resuming does not immediately pause the group.
+            for (auto& entry : state().images) {
+                if (!entry.isVideo || !entry.video) continue;
+                if (!videoAtEnd(entry.video->status())) continue;
+                auto& handled = state().syncHandledEnded;
+                if (std::find(handled.begin(), handled.end(), entry.id) == handled.end()) {
+                    handled.push_back(entry.id);
+                }
+            }
+        }
+        for (auto& entry : state().images) {
+            if (!entry.isVideo || !entry.video) continue;
+            const imview::video::Status status = entry.video->status();
+            if (status.failed) continue;
+            // A finished video stays on its final frame. It must not restart
+            // from zero just because the rest of the sync group resumes.
+            if (play && videoAtEnd(status)) continue;
+            if (play == status.paused) entry.video->togglePlayPause();
+        }
+    } else {
+        if (targetStatus.paused) pauseOtherVideos(id);
+        target->video->togglePlayPause();
+    }
+    app::requestUpdate();
+}
+
+void seekVideoBy(int id, double seconds) {
+    if (state().syncMode && syncAvailable()) {
+        for (auto& entry : state().images) {
+            if (entry.isVideo && entry.video) entry.video->seekBy(seconds);
+        }
+    } else if (ImageEntry* target = findEntry(id)) {
+        if (target->isVideo && target->video) target->video->seekBy(seconds);
+    }
+    state().activeVideoId = id;
+    app::requestUpdate();
+}
+
+void stepVideoFrames(int id, int delta) {
+    if (state().syncMode && syncAvailable()) {
+        for (auto& entry : state().images) {
+            if (entry.isVideo && entry.video) entry.video->stepFrames(delta);
+        }
+    } else if (ImageEntry* target = findEntry(id)) {
+        if (target->isVideo && target->video) target->video->stepFrames(delta);
+    }
+    state().activeVideoId = id;
+    app::requestUpdate();
+}
+
+// Keeps the no-sync single-playback rule after asynchronous opens, and pauses
+// the group when a video in sync mode reaches its end before the others.
+void enforcePlaybackRules() {
+    if (videoCount() == 0) return;
+    if (state().syncMode) {
+        bool newEnded = false;
+        bool anyPlaying = false;
+        auto& handled = state().syncHandledEnded;
+        for (const auto& entry : state().images) {
+            if (!entry.isVideo || !entry.video) continue;
+            const imview::video::Status status = entry.video->status();
+            if (!status.paused && !status.failed) anyPlaying = true;
+            const bool atEnd = videoAtEnd(status);
+            const auto known = std::find(handled.begin(), handled.end(), entry.id);
+            if (atEnd) {
+                if (known == handled.end()) newEnded = true;
+            } else if (known != handled.end()) {
+                handled.erase(known);
+            }
+        }
+        // A video that reaches the end pauses the group once. Once it is
+        // recorded, pressing play can resume the others without immediately
+        // tripping this rule again.
+        if (newEnded) {
+            if (anyPlaying) pauseAllVideos();
+            for (const auto& entry : state().images) {
+                if (!entry.isVideo || !entry.video) continue;
+                if (videoAtEnd(entry.video->status()) &&
+                    std::find(handled.begin(), handled.end(), entry.id) == handled.end()) {
+                    handled.push_back(entry.id);
+                }
+            }
+        }
+        return;
+    }
+    if (videoCount() < 2) return;
+    int keep = activeVideoId();
+    ImageEntry* active = findEntry(keep);
+    bool keepPlaying = active != nullptr && active->video &&
+        !active->video->status().paused && !active->video->status().failed;
+    if (!keepPlaying) {
+        for (const auto& entry : state().images) {
+            if (!entry.isVideo || !entry.video) continue;
+            const imview::video::Status status = entry.video->status();
+            if (!status.failed && !status.paused) {
+                keep = entry.id;
+                break;
+            }
+        }
+    }
+    pauseOtherVideos(keep);
+}
+
+// Called after any grid mutation. Leaving sync mode pauses all but the active
+// video; entering it is handled by the S chip.
+void enforceSyncAvailability() {
+    if (!state().syncMode || syncAvailable()) return;
+    state().syncMode = false;
+    state().syncHandledEnded.clear();
+    pauseOtherVideos(activeVideoId());
+}
+
+void toggleSyncMode() {
+    if (!syncAvailable()) return;
+    state().syncMode = !state().syncMode;
+    state().syncHandledEnded.clear();
+    if (state().syncMode) {
+        pauseAllVideos();
+    } else {
+        pauseOtherVideos(activeVideoId());
+    }
+    app::requestUpdate();
+}
+
 // Diff needs two decoded images with identical pixel dimensions. Mismatched
 // sizes are rejected instead of being resampled into a common canvas.
 bool diffPairReady() {
@@ -399,6 +676,7 @@ bool diffPairReady() {
     if (images.size() != 2) return false;
     const ImageEntry& left = images[0];
     const ImageEntry& right = images[1];
+    if (left.isVideo || right.isVideo) return false;
     return left.loaded && right.loaded && !left.failed && !right.failed &&
            left.pixels && right.pixels && left.width > 0 && left.height > 0 &&
            right.width > 0 && right.height > 0 &&
@@ -449,6 +727,7 @@ void exitDiffMode() {
 }
 
 void toggleDiffMode() {
+    if (!imageToolsEnabled() && !state().diffMode) return;
     if (state().diffMode) {
         exitDiffMode();
         return;
@@ -476,7 +755,8 @@ void enforceDiffMode() {
     const ImageEntry& left = images[0];
     const ImageEntry& right = images[1];
     const bool bothDecoded = left.loaded && right.loaded;
-    if (left.failed || right.failed || (bothDecoded && !diffPairReady())) {
+    if (left.isVideo || right.isVideo || left.failed || right.failed ||
+        (bothDecoded && !diffPairReady())) {
         exitDiffMode();
     }
 }
@@ -626,6 +906,22 @@ void panAllBy(float deltaX, float deltaY) {
     if (diffVisible()) panBy(state().diffImage, deltaX, deltaY);
 }
 
+bool pointerInRect(float x, float y, float width, float height) {
+    float pointerX = 0.0f;
+    float pointerY = 0.0f;
+    if (!imview::frame::cursorLogicalPosition(pointerX, pointerY)) return false;
+    return pointerX >= x && pointerX <= x + width &&
+           pointerY >= y && pointerY <= y + height;
+}
+
+// The close/move buttons live in the top-right corner; the video transport sits
+// in the bottom band. Both only appear while the pointer is in these hot zones.
+bool pointerInButtonHotZone(const ImageEntry& entry) {
+    // The cell itself is the close/move hot zone; the buttons only exist while
+    // the pointer is inside it.
+    return pointerInRect(entry.cellX, entry.cellY, entry.cellW, entry.cellH);
+}
+
 // Returns the image id whose cell contains the given logical point. Hover
 // callbacks already report logical units; drag callbacks report physical ones.
 int cellAt(float x, float y) {
@@ -640,22 +936,11 @@ int cellAt(float x, float y) {
 
 // --- folder sidebar -----------------------------------------------------------
 
-// Defined further down (image loading pipeline). `fromSidebar` marks additions
+// Defined further down (media loading pipeline). `fromSidebar` marks additions
 // driven by the sidebar itself, which must not hide the sidebar.
 void addPaths(const std::vector<std::string>& paths, bool fromSidebar = false,
-              bool preserveDiff = false);
+              bool preserveDiff = false, bool preserveSidebar = false);
 void clearSelections();
-
-bool isImagePath(const std::string& path) {
-    // NOTE: on Windows std::filesystem::path(std::string) interprets the input
-    // as ANSI and throws for UTF-8 bytes that do not form a valid ANSI string,
-    // so every path coming from a UTF-8 std::string must go through u8path.
-    std::string extension = std::filesystem::u8path(path).extension().u8string();
-    std::transform(extension.begin(), extension.end(), extension.begin(),
-                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return extension == ".png" || extension == ".jpg" || extension == ".jpeg" ||
-           extension == ".bmp" || extension == ".gif";
-}
 
 // Case-insensitive comparison of two paths, used to mark files that are already
 // shown in the main grid.
@@ -686,11 +971,12 @@ bool isSelected(int pane, int index) {
     return false;
 }
 
-// Reads the image files of a directory (first level only, name-ascending).
+// Reads the image and video files of a directory (first level only, name-ascending).
 void fillPaneFiles(AppState::FolderPane& pane) {
     namespace fs = std::filesystem;
     pane.paths.clear();
     pane.names.clear();
+    pane.videos.clear();
     pane.scroll = 0.0f;
     std::error_code error;
     fs::directory_iterator iterator(fs::u8path(pane.dir), error);
@@ -700,16 +986,19 @@ void fillPaneFiles(AppState::FolderPane& pane) {
         std::string path;
         std::string name;
         std::string lower;
+        bool video = false;
     };
     std::vector<Item> items;
     for (const auto& entry : iterator) {
         std::error_code entryError;
         if (!entry.is_regular_file(entryError) || entryError) continue;
         const std::string path = entry.path().u8string();
-        if (!isImagePath(path)) continue;
+        const bool video = isVideoPath(path);
+        if (!video && !isImagePath(path)) continue;
         Item item;
         item.path = path;
         item.name = entry.path().filename().u8string();
+        item.video = video;
         item.lower = item.name;
         std::transform(item.lower.begin(), item.lower.end(), item.lower.begin(),
                        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
@@ -720,9 +1009,11 @@ void fillPaneFiles(AppState::FolderPane& pane) {
     });
     pane.paths.reserve(items.size());
     pane.names.reserve(items.size());
+    pane.videos.reserve(items.size());
     for (auto& item : items) {
         pane.paths.push_back(std::move(item.path));
         pane.names.push_back(std::move(item.name));
+        pane.videos.push_back(item.video);
     }
 }
 
@@ -902,6 +1193,9 @@ std::vector<std::string> selectedPaths() {
 // Drops the current grid while keeping the sidebar selection in place.
 void resetGridForOpen() {
     state().images.clear();
+    state().activeVideoId = -1;
+    state().syncMode = false;
+    state().syncHandledEnded.clear();
     state().soloId = -1;
     state().peekId = -1;
     state().moveSourceId = -1;
@@ -933,14 +1227,71 @@ void openSelectionInGrid() {
 
 // --- review mode --------------------------------------------------------------
 
-bool reviewAvailable() {
-    return state().folders.size() == 2;
+// Review mode is an image comparison. A pair index is valid only when neither
+// side at that index is a video and at least one side has an image. Missing
+// entries on the shorter side are allowed, matching the existing pair rules.
+bool reviewPairIsValidImage(int index) {
+    if (index < 0 || state().folders.size() != 2) return false;
+    bool hasImage = false;
+    for (const auto& pane : state().folders) {
+        if (index >= static_cast<int>(pane.paths.size())) continue;
+        if (index < static_cast<int>(pane.videos.size()) &&
+            pane.videos[static_cast<std::size_t>(index)]) {
+            return false;
+        }
+        hasImage = true;
+    }
+    return hasImage;
 }
 
-int reviewPairCount() {
+int reviewFilePairCount() {
     if (state().folders.size() != 2) return 0;
     return static_cast<int>(std::max(state().folders[0].paths.size(),
                                      state().folders[1].paths.size()));
+}
+
+int firstReviewImagePair() {
+    const int count = reviewFilePairCount();
+    for (int index = 0; index < count; ++index) {
+        if (reviewPairIsValidImage(index)) return index;
+    }
+    return -1;
+}
+
+int reviewImagePairCount() {
+    const int count = reviewFilePairCount();
+    int valid = 0;
+    for (int index = 0; index < count; ++index) {
+        if (reviewPairIsValidImage(index)) ++valid;
+    }
+    return valid;
+}
+
+// 1-based position of a file index among the valid image pairs.
+int reviewImageOrdinal(int index) {
+    int ordinal = 0;
+    for (int candidate = 0; candidate <= index; ++candidate) {
+        if (reviewPairIsValidImage(candidate)) ++ordinal;
+    }
+    return ordinal;
+}
+
+int nextReviewImagePair(int from, int delta) {
+    const int count = reviewFilePairCount();
+    if (count == 0 || delta == 0) return -1;
+    const int step = delta > 0 ? 1 : -1;
+    for (int index = from + step; index >= 0 && index < count; index += step) {
+        if (reviewPairIsValidImage(index)) return index;
+    }
+    return -1;
+}
+
+bool reviewAvailable() {
+    return firstReviewImagePair() >= 0;
+}
+
+int reviewPairCount() {
+    return reviewImagePairCount();
 }
 
 // Largest scroll value across both panes, so the two lists can be aligned by row
@@ -983,10 +1334,8 @@ void revealReviewPair() {
 // Opens pair `index`: folder 1's image on the left, folder 2's on the right.
 // When one folder has fewer images the missing side is simply omitted.
 void openReviewPair(int index) {
-    if (!reviewAvailable()) return;
-    const int pairCount = reviewPairCount();
-    if (pairCount == 0) return;
-    const int pair = std::clamp(index, 0, pairCount - 1);
+    if (!reviewAvailable() || !reviewPairIsValidImage(index)) return;
+    const int pair = index;
 
     auto& folders = state().folders;
     std::vector<std::string> paths;
@@ -1000,6 +1349,9 @@ void openReviewPair(int index) {
 
     state().reviewIndex = pair;
     state().images.clear();
+    state().activeVideoId = -1;
+    state().syncMode = false;
+    state().syncHandledEnded.clear();
     state().soloId = -1;
     state().peekId = -1;
     state().zoom = 1.0f;
@@ -1022,11 +1374,12 @@ void openReviewPair(int index) {
 }
 
 void enterReviewMode() {
-    if (!reviewAvailable()) return;
+    const int first = firstReviewImagePair();
+    if (first < 0) return;
     state().reviewMode = true;
     state().dropTarget = AppState::DropTarget::None;
     state().sidebarVisible = true;
-    openReviewPair(0);
+    openReviewPair(first);
     app::requestUpdate();
 }
 
@@ -1047,7 +1400,8 @@ void toggleReviewMode() {
 
 void reviewStep(int delta) {
     if (!state().reviewMode || !reviewAvailable()) return;
-    openReviewPair(state().reviewIndex + delta);
+    const int next = nextReviewImagePair(state().reviewIndex, delta);
+    if (next >= 0) openReviewPair(next);
 }
 
 // Appends the selection (both panes, pane then index order), capped at four.
@@ -1078,6 +1432,7 @@ void finishMove() {
 }
 
 void applyZoom(float factor) {
+    if (!imageToolsEnabled()) return;
     float next = state().zoom * factor;
     next = std::clamp(next, 1.0f, kMaxZoom);
     state().zoom = next;
@@ -1086,11 +1441,11 @@ void applyZoom(float factor) {
 }
 
 bool zoomEnabled() {
-    return !state().localMode;
+    return !state().localMode && !hasVideoMedia();
 }
 
 bool panEnabled() {
-    return state().zoom > 1.0f && !state().localMode;
+    return state().zoom > 1.0f && !state().localMode && !hasVideoMedia();
 }
 
 // --- solo mode ----------------------------------------------------------------
@@ -1115,6 +1470,7 @@ int shownSoloId() {
 }
 
 void enterSolo(int id) {
+    if (!imageToolsEnabled()) return;
     if (!findEntry(id)) return;
     state().soloId = id;
     state().peekId = -1;
@@ -1131,6 +1487,7 @@ void exitSolo() {
 }
 
 void toggleSolo(int id) {
+    if (!imageToolsEnabled() && !soloActive()) return;
     if (soloActive() && state().soloId == id) {
         exitSolo();
     } else {
@@ -1278,6 +1635,33 @@ void clearSelections() {
     }
 }
 
+// Mixed media turns off the image comparison features. The toggle state is kept
+// so removing the video restores EXIF/histogram and other preferences.
+void enforceMediaMode() {
+    if (!hasVideoMedia()) {
+        enforceSyncAvailability();
+        return;
+    }
+    state().zoom = 1.0f;
+    resetPans();
+    state().localMode = false;
+    state().qSwapActive = false;
+    state().soloId = -1;
+    state().peekId = -1;
+    state().moveSourceId = -1;
+    state().moveTargetId = -1;
+    state().selecting = false;
+    state().movingSelection = false;
+    state().movingCellId = -1;
+    exitDiffMode();
+    clearSelections();
+    if (state().activeVideoId >= 0) {
+        ImageEntry* active = findEntry(state().activeVideoId);
+        if (active == nullptr || !active->isVideo) state().activeVideoId = -1;
+    }
+    enforceSyncAvailability();
+}
+
 // Average colour of the selection, sampled from the decoded pixels.
 void computeStats(ImageEntry& entry) {
     entry.hasStats = false;
@@ -1347,6 +1731,7 @@ void computeStats(ImageEntry& entry) {
 }
 
 void toggleLocalMode() {
+    if (!imageToolsEnabled()) return;
     state().localMode = !state().localMode;
     if (!state().localMode) clearSelections();
     app::requestUpdate();
@@ -1387,11 +1772,12 @@ LumaHistogram buildHistogram(const std::vector<std::uint8_t>& pixels, int width,
 // --- cell operations (P3) ------------------------------------------------------
 
 void rotateImage(int displayIndex) {
-    if (displayIndex < 0 ||
+    if (!imageToolsEnabled() || displayIndex < 0 ||
         displayIndex >= static_cast<int>(state().images.size())) {
         return;
     }
     ImageEntry& entry = state().images[static_cast<std::size_t>(displayIndex)];
+    if (entry.isVideo) return;
     entry.rotation = (entry.rotation + 1) % 4;
     entry.hasSelection = false;
     entry.hasStats = false;
@@ -1417,13 +1803,21 @@ void removeImage(int id) {
     if (state().peekId == id) {
         state().peekId = -1;
     }
+    if (state().activeVideoId == id) {
+        state().activeVideoId = -1;
+    }
+    state().syncHandledEnded.erase(
+        std::remove(state().syncHandledEnded.begin(), state().syncHandledEnded.end(), id),
+        state().syncHandledEnded.end());
     if (images.empty()) {
         state().zoom = 1.0f;
         resetPans();
         state().qSwapActive = false;
         state().localMode = false;
+        state().activeVideoId = -1;
         clearSelections();
     }
+    enforceMediaMode();
     enforceDiffMode();
     app::requestUpdate();
 }
@@ -1444,7 +1838,7 @@ void applySharedSelection(float x0, float y0, float x1, float y1) {
 void beginQSwap() {
     // Compare helper: while Q is held the right image is drawn over the left
     // cell. Order is never changed, so this is safe in review mode too.
-    if (state().qSwapActive || state().images.size() != 2) return;
+    if (!imageToolsEnabled() || state().qSwapActive || state().images.size() != 2) return;
     state().qSwapActive = true;
     // The cover cell switches to another stream; make sure it has a frame.
     ImageEntry& right = state().images[1];
@@ -1464,20 +1858,30 @@ void endQSwap() {
 
 // --- input (command line) ----------------------------------------------------
 
-std::vector<std::string> launchArgs() {
-    std::vector<std::string> args;
+struct LaunchRequest {
+    std::vector<std::string> paths;
+    bool newWindow = false;
+};
+
+LaunchRequest launchRequest() {
+    LaunchRequest request;
 #if defined(_WIN32)
     int count = 0;
     LPWSTR* list = CommandLineToArgvW(GetCommandLineW(), &count);
     if (list != nullptr && count > 1) {
         for (int i = 1; i < count; ++i) {
             std::string value = imview::utf8::narrow(list[i]);
-            if (!value.empty()) args.push_back(std::move(value));
+            if (value.empty()) continue;
+            if (value == "--new-window") {
+                request.newWindow = true;
+            } else {
+                request.paths.push_back(std::move(value));
+            }
         }
     }
     if (list != nullptr) LocalFree(list);
 #endif
-    return args;
+    return request;
 }
 
 // --- loading ------------------------------------------------------------------
@@ -1563,8 +1967,38 @@ void startLoad(const std::string& path) {
     }
 }
 
-void addPaths(const std::vector<std::string>& paths, bool fromSidebar, bool preserveDiff) {
-    std::vector<std::string> accepted;
+void startVideoLoad(const std::string& path) {
+    ImageEntry entry;
+    entry.id = state().nextId++;
+    entry.path = path;
+    entry.name = std::filesystem::u8path(path).filename().u8string();
+    entry.isVideo = true;
+    entry.video = std::make_shared<imview::video::Player>();
+    entry.loading = true;
+    const int id = entry.id;
+    state().images.push_back(std::move(entry));
+    state().activeVideoId = id;
+    ImageEntry& added = state().images.back();
+    added.video->setVolume(state().volume);
+    added.video->setMuted(state().muted);
+    added.video->open(path);
+    if (state().syncMode) {
+        // A newly added video joins a paused sync group.
+        pauseAllVideos();
+    } else {
+        // Default playback is exclusive: the new video starts, older ones stop.
+        pauseOtherVideos(id);
+    }
+    app::requestUpdate();
+}
+
+void addPaths(const std::vector<std::string>& paths, bool fromSidebar,
+              bool preserveDiff, bool preserveSidebar) {
+    struct Candidate {
+        std::string path;
+        bool video = false;
+    };
+    std::vector<Candidate> accepted;
     for (const std::string& path : paths) {
         // A directory argument opens the sidebar instead of a grid cell.
         std::error_code error;
@@ -1572,8 +2006,9 @@ void addPaths(const std::vector<std::string>& paths, bool fromSidebar, bool pres
             addFolder(path);
             continue;
         }
+        const bool video = isVideoPath(path);
+        if (!video && !isImagePath(path)) continue;
         if (state().images.size() + accepted.size() >= kMaxImages) break;
-        if (!isImagePath(path)) continue;
         // Case-insensitive, like the sidebar's "already open" dot: on Windows
         // the same file can arrive with different capitalisation.
         const bool present = std::any_of(
@@ -1582,19 +2017,29 @@ void addPaths(const std::vector<std::string>& paths, bool fromSidebar, bool pres
         if (present) continue;
         const bool queued = std::any_of(
             accepted.begin(), accepted.end(),
-            [&](const std::string& other) { return samePath(other, path); });
+            [&](const Candidate& other) { return samePath(other.path, path); });
         if (queued) continue;
-        accepted.push_back(path);
+        accepted.push_back({path, video});
     }
-    for (const std::string& path : accepted) startLoad(path);
-    if (!preserveDiff) enforceDiffMode();
-    if (!accepted.empty()) {
-        // Opening images dismisses the sidebar; opening a folder brings it back.
-        // Additions made from the sidebar itself keep it visible, and review
-        // mode always needs it.
-        if (!fromSidebar && !state().reviewMode) {
-            state().sidebarVisible = false;
+
+    bool acceptedVideo = false;
+    for (const Candidate& candidate : accepted) {
+        if (candidate.video) {
+            startVideoLoad(candidate.path);
+            acceptedVideo = true;
+        } else {
+            startLoad(candidate.path);
         }
+    }
+    if (!accepted.empty()) {
+        enforceMediaMode();
+        if (!preserveDiff) enforceDiffMode();
+        // Videos keep the sidebar; Explorer add requests and sidebar-driven
+        // additions preserve whatever the user already has.
+        const bool keepSidebar = fromSidebar || preserveSidebar ||
+                                 state().reviewMode || acceptedVideo ||
+                                 hasVideoMedia();
+        if (!keepSidebar) state().sidebarVisible = false;
         app::requestUpdate();
     }
 }
@@ -1606,11 +2051,12 @@ bool isDirectoryPath(const std::string& path) {
     return std::filesystem::is_directory(std::filesystem::u8path(path), error) && !error;
 }
 
-// A file drop is accepted only when at least one image would actually be added
-// (the grid is not full and the file is not already open).
+// A file drop is accepted only when at least one image or video would actually
+// be opened (the grid is not full and an image is not already open).
 bool hasNewDroppedImage(const std::vector<std::string>& paths) {
     if (state().images.size() >= kMaxImages) return false;
     for (const std::string& path : paths) {
+        if (isVideoPath(path)) return true;
         if (!isImagePath(path)) continue;
         if (!isOpenInGrid(path)) return true;
     }
@@ -1666,7 +2112,9 @@ bool handleFileDrop(const imview::frame::FileDropEvent& event) {
         if (target == AppState::DropTarget::Main) {
             std::vector<std::string> files;
             for (const std::string& path : event.paths) {
-                if (!isDirectoryPath(path) && isImagePath(path)) files.push_back(path);
+                if (!isDirectoryPath(path) && (isImagePath(path) || isVideoPath(path))) {
+                    files.push_back(path);
+                }
             }
             if (files.empty()) return false;
             // fromSidebar=true keeps the sidebar visible while adding to the grid.
@@ -1695,12 +2143,71 @@ void openImages() {
     // Review mode only allows opening images through the sidebar double-click.
     if (state().reviewMode) return;
     eui::platform::FileDialogOptions options;
-    options.prompt = "Open images";
-    options.allowedExtensions = {"png", "jpg", "jpeg", "bmp", "gif"};
-    options.filterName = "Images";
+    options.prompt = "Open";
+    std::vector<std::string> extensions;
+    for (const auto& extension : imview::media::imageExtensions()) {
+        extensions.push_back(extension.substr(1));
+    }
+    for (const auto& extension : imview::media::videoExtensions()) {
+        extensions.push_back(extension.substr(1));
+    }
+    options.allowedExtensions = std::move(extensions);
+    options.filterName = "Images and videos";
     options.allowMultiple = true;
     const eui::platform::FileDialogResult result = eui::platform::openFileDialog(options);
     if (result.selected()) addPaths(result.paths);
+}
+
+// --- Explorer / second instance -------------------------------------------------
+
+bool canAcceptExternalPaths(const std::vector<std::string>& paths) {
+    bool hasMedia = false;
+    bool hasFolder = false;
+    std::vector<std::string> additional;
+    for (const std::string& path : paths) {
+        std::error_code error;
+        if (std::filesystem::is_directory(std::filesystem::u8path(path), error) && !error) {
+            hasFolder = true;
+            continue;
+        }
+        if (!isImagePath(path) && !isVideoPath(path)) continue;
+        hasMedia = true;
+        if (isOpenInGrid(path)) continue;
+        const bool queued = std::any_of(
+            additional.begin(), additional.end(),
+            [&](const std::string& other) { return samePath(other, path); });
+        if (!queued) additional.push_back(path);
+    }
+    if (!hasMedia && !hasFolder) return false;
+    return state().images.size() + additional.size() <= kMaxImages;
+}
+
+bool handleExternalOpen(const std::vector<std::string>& paths) {
+    if (!canAcceptExternalPaths(paths)) return false;
+    if (state().reviewMode) exitReviewMode();
+    addPaths(paths, true, false, true);
+    imview::frame::activateWindow();
+    return true;
+}
+
+std::string launchFolder(const std::vector<std::string>& paths) {
+    for (const std::string& path : paths) {
+        if (isDirectoryPath(path)) return path;
+    }
+    for (const std::string& path : paths) {
+        if (!isImagePath(path) && !isVideoPath(path)) continue;
+        const std::filesystem::path parent =
+            std::filesystem::u8path(path).parent_path();
+        if (!parent.empty()) return parent.u8string();
+    }
+    return {};
+}
+
+void shutdownMedia() {
+    for (auto& entry : state().images) {
+        if (entry.video) entry.video->close();
+    }
+    state().images.clear();
 }
 
 // --- diff image ---------------------------------------------------------------
@@ -2100,8 +2607,129 @@ void composeDiffThresholdSlider(eui::Ui& ui, float x, float y) {
     }).build();
 }
 
+// Global volume control in the title bar, using the same label/slider/value
+// geometry as the diff threshold. Every video in the window shares it.
+void composeVolumeSlider(eui::Ui& ui, float x, float y) {
+    constexpr float kHeight = 20.0f;
+    constexpr float kLabelWidth = 28.0f;
+    constexpr float kSliderWidth = 120.0f;
+    constexpr float kValueWidth = 34.0f;
+    constexpr float kGap = 4.0f;
+    constexpr float kMuteWidth = 20.0f;
+    constexpr float kTrackHeight = 4.0f;
+    constexpr float kKnobSize = 12.0f;
+    const float value = std::clamp(state().volume, 0.0f, 1.0f);
+    const float trackY = (kHeight - kTrackHeight) * 0.5f;
+    const float knobX = value * (kSliderWidth - kKnobSize);
+
+    ui.stack("toolbar.volume").position(x, y).size(
+        kLabelWidth + kGap + kSliderWidth + kGap + kValueWidth + 2.0f + kMuteWidth,
+        kHeight).content([&] {
+        ui.text("toolbar.volume.label").position(0.0f, 0.0f)
+            .size(kLabelWidth, kHeight).text("Vol")
+            .color(kTextSecondary).fontSize(11.0f)
+            .verticalAlign(eui::VerticalAlign::Center).build();
+
+        const float sliderX = kLabelWidth + kGap;
+        ui.rect("toolbar.volume.track")
+            .position(snapToPixel(sliderX), snapToPixel(trackY))
+            .size(kSliderWidth, kTrackHeight)
+            .color({1.0f, 1.0f, 1.0f, 0.16f})
+            .radius(kTrackHeight * 0.5f).build();
+        if (value > 0.0f) {
+            ui.rect("toolbar.volume.fill")
+                .position(snapToPixel(sliderX), snapToPixel(trackY))
+                .size(std::max(kTrackHeight, kSliderWidth * value), kTrackHeight)
+                .color(state().muted ? kTextSecondary : kAccent)
+                .radius(kTrackHeight * 0.5f).build();
+        }
+        ui.rect("toolbar.volume.knob")
+            .position(snapToPixel(sliderX + knobX),
+                      snapToPixel((kHeight - kKnobSize) * 0.5f))
+            .size(kKnobSize, kKnobSize).radius(kKnobSize * 0.5f)
+            .color(kTextPrimary).build();
+
+        ui.text("toolbar.volume.value")
+            .position(sliderX + kSliderWidth + kGap, 0.0f)
+            .size(kValueWidth, kHeight)
+            .text(std::to_string(static_cast<int>(std::lround(value * 100.0f))) + "%")
+            .color(kTextPrimary).fontSize(11.0f)
+            .horizontalAlign(eui::HorizontalAlign::Right)
+            .verticalAlign(eui::VerticalAlign::Center).build();
+
+        ui.rect("toolbar.volume.hit")
+            .position(sliderX, 0.0f).size(kSliderWidth, kHeight)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .acceptedButtons(eui::PointerButton::Left)
+            .onPress([](const core::PointerEvent& event, const core::Rect& bounds) {
+                if (event.button != eui::PointerButton::Left || bounds.width <= 0.0f) return;
+                const float fraction = std::clamp(
+                    static_cast<float>((event.x - bounds.x) / bounds.width), 0.0f, 1.0f);
+                state().volumeDragStart = fraction;
+                state().volume = fraction;
+                state().muted = false;
+                applyGlobalVolumeToPlayers();
+                app::requestUpdate();
+            })
+            .onDrag([](const core::dsl::DragEvent& event) {
+                if (event.button != eui::PointerButton::Left) return;
+                const float scale = imview::frame::dpiScale();
+                const float delta = scale > 0.0f
+                    ? static_cast<float>(event.totalX) / scale
+                    : static_cast<float>(event.totalX);
+                state().volume = std::clamp(
+                    state().volumeDragStart + delta / 120.0f, 0.0f, 1.0f);
+                state().muted = false;
+                applyGlobalVolumeToPlayers();
+                app::requestUpdate();
+            })
+            .cursor(eui::CursorShape::Hand)
+            .build();
+
+        const float muteX = sliderX + kSliderWidth + kGap + kValueWidth + 2.0f;
+        ui.stack("toolbar.volume.mute").position(muteX, 0.0f)
+            .size(kMuteWidth, kHeight).content([&] {
+                const eui::Color base = state().muted ? kAccent : kChipIdle;
+                const eui::Color hover = state().muted ? kAccentHover : kChipIdleHover;
+                const eui::Color pressed = state().muted ? kAccentPressed : kChipPressed;
+                ui.rect("toolbar.volume.mute.bg").size(kMuteWidth, kHeight)
+                    .color(base).radius(3.0f).states(base, hover, pressed).build();
+                ui.text("toolbar.volume.mute.label").size(kMuteWidth, kHeight)
+                    .text("M").color(state().muted ? kWhite : kTextSecondary)
+                    .fontSize(10.0f)
+                    .horizontalAlign(eui::HorizontalAlign::Center)
+                    .verticalAlign(eui::VerticalAlign::Center).build();
+                ui.rect("toolbar.volume.mute.hit").size(kMuteWidth, kHeight)
+                    .color({0.0f, 0.0f, 0.0f, 0.0f})
+                    .onClick([] {
+                        state().muted = !state().muted;
+                        applyGlobalVolumeToPlayers();
+                        app::requestUpdate();
+                    })
+                    .cursor(eui::CursorShape::Hand)
+                    .build();
+            }).build();
+    }).build();
+}
+
+std::string formatVideoTime(double seconds) {
+    if (!std::isfinite(seconds) || seconds < 0.0) seconds = 0.0;
+    const long total = std::lround(seconds);
+    const long hours = total / 3600;
+    const long minutes = (total / 60) % 60;
+    const long remainder = total % 60;
+    char buffer[32];
+    if (hours > 0) {
+        std::snprintf(buffer, sizeof(buffer), "%ld:%02ld:%02ld", hours, minutes, remainder);
+    } else {
+        std::snprintf(buffer, sizeof(buffer), "%02ld:%02ld", minutes, remainder);
+    }
+    return buffer;
+}
+
 void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
     const int count = static_cast<int>(state().images.size());
+    const bool imageTools = imageToolsEnabled();
     const float controlHeight = 24.0f;
     const float centerY = (kToolbarHeight - controlHeight) * 0.5f;
 
@@ -2113,30 +2741,36 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
     } else if (soloActive()) {
         status = std::to_string(indexOf(shownSoloId())) + " / " + std::to_string(count);
     } else if (state().reviewMode) {
-        status = "Review " + std::to_string(state().reviewIndex + 1) + " / " +
-                 std::to_string(reviewPairCount());
+        status = "Review " + std::to_string(reviewImageOrdinal(state().reviewIndex)) +
+                 " / " + std::to_string(reviewPairCount());
         if (count == 1) status += "  single";
     } else {
         status.clear(); // the image count alone is not worth showing
     }
 
-    std::string modes;
-    const auto appendMode = [&modes](const char* label) {
-        if (!modes.empty()) modes += "  \xc2\xb7  ";
-        modes += label;
-    };
-    if (state().showExif) appendMode("EXIF");
-    if (state().showHistogram) appendMode("Histogram");
-    if (state().localMode) appendMode("Local");
-    if (state().diffMode) appendMode("Diff");
-    if (!modes.empty()) {
-        if (!status.empty()) status += "  \xc2\xb7  ";
-        status += modes;
+    if (imageTools) {
+        std::string modes;
+        const auto appendMode = [&modes](const char* label) {
+            if (!modes.empty()) modes += "  \xc2\xb7  ";
+            modes += label;
+        };
+        if (state().showExif) appendMode("EXIF");
+        if (state().showHistogram) appendMode("Histogram");
+        if (state().localMode) appendMode("Local");
+        if (state().diffMode) appendMode("Diff");
+        if (!modes.empty()) {
+            if (!status.empty()) status += "  \xc2\xb7  ";
+            status += modes;
+        }
+        const int zoomPercent = static_cast<int>(std::lround(state().zoom * 100.0f));
+        if (zoomPercent > 100) {
+            if (!status.empty()) status += "  \xc2\xb7  ";
+            status += std::to_string(zoomPercent) + "%";
+        }
     }
-    const int zoomPercent = static_cast<int>(std::lround(state().zoom * 100.0f));
-    if (zoomPercent > 100) {
+    if (state().syncMode) {
         if (!status.empty()) status += "  \xc2\xb7  ";
-        status += std::to_string(zoomPercent) + "%";
+        status += "Sync";
     }
 
     ui.stack("toolbar").position(0.0f, 0.0f).size(screen.width, kToolbarHeight)
@@ -2154,6 +2788,27 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
             .position(0.0f, 0.0f)
             .size(screen.width, kToolbarHeight)
             .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .acceptedButtons(eui::PointerButton::Left)
+            .onPress([](const core::PointerEvent& event, const core::Rect&) {
+                if (event.button != eui::PointerButton::Left || !hasVideoMedia()) return;
+                imview::frame::beginWindowMove();
+            })
+            .onDrag([](const core::dsl::DragEvent& event) {
+                if (event.button == eui::PointerButton::Left) {
+                    imview::frame::dragWindowToCursor();
+                }
+            })
+            .onRelease([](const core::PointerEvent& event, const core::Rect&) {
+                if (event.button == eui::PointerButton::Left) {
+                    imview::frame::endWindowMove();
+                }
+            })
+            .onClick([] {
+                if (isDoubleClick(state().titleClick, 0, 0,
+                                  core::window::timeSeconds())) {
+                    imview::frame::toggleMaximizeWindow();
+                }
+            })
             .cursor(eui::CursorShape::Arrow)
             .build();
 
@@ -2179,6 +2834,8 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
         if (state().diffMode) {
             composeDiffThresholdSlider(ui, 82.0f,
                                        (kToolbarHeight - 20.0f) * 0.5f);
+        } else if (hasVideoMedia()) {
+            composeVolumeSlider(ui, 82.0f, (kToolbarHeight - 20.0f) * 0.5f);
         }
 
         // Centre: status indicator.
@@ -2199,29 +2856,33 @@ void composeToolbar(eui::Ui& ui, const eui::Screen& screen) {
         float right = screen.width - 3.0f * winButton - 8.0f;
 
         right -= chipSize;
+        composeToggleChip(ui, "toolbar.chip.s", right, centerY, chipSize, "S",
+                          state().syncMode, [] { toggleSyncMode(); },
+                          syncAvailable());
+        right -= 2.0f + chipSize;
         composeToggleChip(ui, "toolbar.chip.r", right, centerY, chipSize, "R",
                           state().reviewMode, [] { toggleReviewMode(); },
-                          reviewAvailable());
+                          reviewAvailable() && (!mixedMedia() || state().reviewMode));
 
         right -= 6.0f + chipSize;
         composeToggleChip(ui, "toolbar.chip.p", right, centerY, chipSize, "P",
-                          state().localMode, [] { toggleLocalMode(); });
+                          state().localMode, [] { toggleLocalMode(); }, imageTools);
         right -= 2.0f + chipSize;
         composeToggleChip(ui, "toolbar.chip.h", right, centerY, chipSize, "H",
                           state().showHistogram, [] {
                               state().showHistogram = !state().showHistogram;
                               app::requestUpdate();
-                          });
+                          }, imageTools);
         right -= 2.0f + chipSize;
         composeToggleChip(ui, "toolbar.chip.e", right, centerY, chipSize, "E",
                           state().showExif, [] {
                               state().showExif = !state().showExif;
                               app::requestUpdate();
-                          });
+                          }, imageTools);
         right -= 2.0f + chipSize;
         composeToggleChip(ui, "toolbar.chip.d", right, centerY, chipSize, "D",
                           state().diffMode, [] { toggleDiffMode(); },
-                          diffPairReady() || state().diffMode);
+                          imageTools && (diffPairReady() || state().diffMode));
 
         // Window buttons, right-most in the bar (full height, VS Code style).
         float windowX = screen.width - 3.0f * winButton;
@@ -2244,7 +2905,8 @@ void composeCellButton(eui::Ui& ui, const std::string& id, float x, float y,
                        int glyph, bool armed,
                        const std::function<void()>& onPress,
                        const std::function<void(float, float)>& onDrag = {},
-                       const std::function<void()>& onRelease = {}) {
+                       const std::function<void()>& onRelease = {},
+                       const std::function<void(bool)>& onHoverChanged = {}) {
     constexpr float kSize = 18.0f;
     const eui::Color idle = armed ? kAccent : eui::Color{0.0f, 0.0f, 0.0f, 0.45f};
     const eui::Color hover = armed ? kAccentHover : eui::Color{0.0f, 0.0f, 0.0f, 0.72f};
@@ -2315,6 +2977,9 @@ void composeCellButton(eui::Ui& ui, const std::string& id, float x, float y,
             hit.onRelease([onRelease](const core::PointerEvent& event, const core::Rect&) {
                 if (event.button == eui::PointerButton::Left) onRelease();
             });
+        }
+        if (onHoverChanged) {
+            hit.onHover([onHoverChanged](bool hovered) { onHoverChanged(hovered); });
         }
         hit.cursor(eui::CursorShape::Hand).build();
     }).build();
@@ -2527,6 +3192,7 @@ void composeCellInteractions(eui::Ui& ui, int entryId, const std::string& id,
             if (!zoomEnabled() || event.y == 0.0) return;
             applyZoom(static_cast<float>(std::pow(1.1, event.y)));
         })
+        .onHover([](bool) { app::requestUpdate(); })
         // NOTE: on*() handlers force the Hand cursor, so this must come last.
         .cursor(eui::CursorShape::Arrow)
         .build();
@@ -2539,7 +3205,8 @@ void composeCellInteractions(eui::Ui& ui, int entryId, const std::string& id,
     const float buttonY = kButtonMargin;
     if (showCloseButton) {
         composeCellButton(ui, id + ".close", buttonX, buttonY, 0, false,
-                          [entryId] { removeImage(entryId); });
+                          [entryId] { removeImage(entryId); }, {}, {},
+                          [](bool) { app::requestUpdate(); });
         buttonX -= kButtonSize + kButtonGap;
     }
     if (showMoveButton) {
@@ -2563,14 +3230,532 @@ void composeCellInteractions(eui::Ui& ui, int entryId, const std::string& id,
                     app::requestUpdate();
                 }
             },
-            [] { finishMove(); });
+            [] { finishMove(); },
+            [](bool) { app::requestUpdate(); });
     }
+}
+
+// --- video cell controls ------------------------------------------------------
+
+float videoBarHeight(float cellHeight) {
+    return std::min(44.0f, std::max(24.0f, cellHeight * 0.45f));
+}
+
+void composeVideoTextButton(eui::Ui& ui, const std::string& id, float x, float y,
+                            float width, float height, const std::string& label,
+                            bool active, bool enabled,
+                            const std::function<void()>& onTap,
+                            float fontSize = 9.5f) {
+    const eui::Color base = active ? kAccent : eui::Color{0.0f, 0.0f, 0.0f, 0.0f};
+    const eui::Color hover = active ? kAccentHover : eui::Color{1.0f, 1.0f, 1.0f, 0.10f};
+    const eui::Color pressed = active ? kAccentPressed : eui::Color{1.0f, 1.0f, 1.0f, 0.16f};
+    ui.stack(id).position(x, y).size(width, height).content([&] {
+        ui.rect(id + ".bg").size(width, height).radius(3.0f)
+            .color(enabled ? base : eui::Color{0.0f, 0.0f, 0.0f, 0.0f})
+            .states(enabled ? base : eui::Color{0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? hover : eui::Color{0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? pressed : eui::Color{0.0f, 0.0f, 0.0f, 0.0f})
+            .build();
+        ui.text(id + ".label").size(width, height).text(label)
+            .color(enabled ? (active ? kWhite : kTextPrimary)
+                           : eui::Color{1.0f, 1.0f, 1.0f, 0.28f})
+            .fontSize(fontSize)
+            .horizontalAlign(eui::HorizontalAlign::Center)
+            .verticalAlign(eui::VerticalAlign::Center).build();
+        ui.rect(id + ".hit").size(width, height)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .onClick(enabled ? onTap : std::function<void()>{})
+            .onHover([](bool) { app::requestUpdate(); })
+            .cursor(enabled ? eui::CursorShape::Hand : eui::CursorShape::Arrow)
+            .build();
+    }).build();
+}
+
+void composeVideoSeekButton(eui::Ui& ui, const std::string& id, float x, float y,
+                            float width, float height, bool forward, bool enabled,
+                            const std::function<void()>& onTap) {
+    ui.stack(id).position(x, y).size(width, height).content([&] {
+        ui.rect(id + ".bg").size(width, height).radius(3.0f)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .states({0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? eui::Color{1.0f, 1.0f, 1.0f, 0.10f}
+                            : eui::Color{0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? eui::Color{1.0f, 1.0f, 1.0f, 0.16f}
+                            : eui::Color{0.0f, 0.0f, 0.0f, 0.0f})
+            .build();
+        const eui::Color ink = enabled ? kTextPrimary
+                                       : eui::Color{1.0f, 1.0f, 1.0f, 0.28f};
+        if (forward) {
+            ui.polygon(id + ".arrow").position(4.0f, 3.0f).size(11.0f, 12.0f)
+                .points({{2.0f, 0.0f}, {11.0f, 6.0f}, {2.0f, 12.0f}})
+                .color(ink).build();
+        } else {
+            ui.polygon(id + ".arrow").position(5.0f, 3.0f).size(11.0f, 12.0f)
+                .points({{9.0f, 0.0f}, {0.0f, 6.0f}, {9.0f, 12.0f}})
+                .color(ink).build();
+        }
+        ui.rect(id + ".hit").size(width, height)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .onClick(enabled ? onTap : std::function<void()>{})
+            .onHover([](bool) { app::requestUpdate(); })
+            .cursor(enabled ? eui::CursorShape::Hand : eui::CursorShape::Arrow)
+            .build();
+    }).build();
+}
+
+void composeVideoPlayButton(eui::Ui& ui, const std::string& id, float x, float y,
+                            float width, float height, bool paused, bool enabled,
+                            const std::function<void()>& onTap) {
+    ui.stack(id).position(x, y).size(width, height).content([&] {
+        ui.rect(id + ".bg").size(width, height).radius(3.0f)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .states({0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? eui::Color{1.0f, 1.0f, 1.0f, 0.10f}
+                            : eui::Color{0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? eui::Color{1.0f, 1.0f, 1.0f, 0.16f}
+                            : eui::Color{0.0f, 0.0f, 0.0f, 0.0f})
+            .build();
+        const eui::Color ink = enabled ? kTextPrimary
+                                       : eui::Color{1.0f, 1.0f, 1.0f, 0.28f};
+        if (paused) {
+            ui.polygon(id + ".play").position(5.0f, 3.0f).size(10.0f, 12.0f)
+                .points({{0.0f, 0.0f}, {10.0f, 6.0f}, {0.0f, 12.0f}})
+                .color(ink).build();
+        } else {
+            ui.rect(id + ".pause1").position(6.0f, 3.0f).size(3.0f, 12.0f)
+                .color(ink).build();
+            ui.rect(id + ".pause2").position(11.0f, 3.0f).size(3.0f, 12.0f)
+                .color(ink).build();
+        }
+        ui.rect(id + ".hit").size(width, height)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .onClick(enabled ? onTap : std::function<void()>{})
+            .onHover([](bool) { app::requestUpdate(); })
+            .cursor(enabled ? eui::CursorShape::Hand : eui::CursorShape::Arrow)
+            .build();
+    }).build();
+}
+
+void seekVideoFraction(int entryId, float fraction) {
+    ImageEntry* entry = findEntry(entryId);
+    if (entry == nullptr || !entry->video) return;
+    const imview::video::Status status = entry->video->status();
+    fraction = std::clamp(fraction, 0.0f, 1.0f);
+    const double target = status.duration > 0.0 ? status.duration * fraction : 0.0;
+    entry->progressPreviewFraction = fraction;
+    entry->progressPreviewTime = target;
+    // The progress bar is intentionally per-video: durations need not match,
+    // so a sync-mode click only seeks the cell under the pointer.
+    entry->video->seekTo(target);
+    state().activeVideoId = entryId;
+    app::requestUpdate();
+}
+
+void previewVideoFraction(int entryId, float fraction) {
+    ImageEntry* entry = findEntry(entryId);
+    if (entry == nullptr || !entry->video) return;
+    const imview::video::Status status = entry->video->status();
+    fraction = std::clamp(fraction, 0.0f, 1.0f);
+    entry->progressPreviewFraction = fraction;
+    entry->progressPreviewTime = status.duration > 0.0 ? status.duration * fraction : 0.0;
+    entry->progressPreviewActive = true;
+    entry->video->requestPreview(entry->progressPreviewTime);
+    state().activeVideoId = entryId;
+    app::requestUpdate();
+}
+
+void composeVideoProgress(eui::Ui& ui, ImageEntry& entry,
+                          const imview::video::Status& status,
+                          float x, float y, float width) {
+    const float fraction = status.duration > 0.0
+        ? static_cast<float>(std::clamp(status.position / status.duration, 0.0, 1.0))
+        : 0.0f;
+    constexpr float kHeight = 14.0f;
+    constexpr float kTrackY = 5.0f;
+    constexpr float kTrackHeight = 3.0f;
+    constexpr float kKnobSize = 8.0f;
+    const int entryId = entry.id;
+    ui.stack("cell" + std::to_string(entryId) + ".progress")
+        .position(x, y).size(width, kHeight).content([&] {
+        ui.rect("cell" + std::to_string(entryId) + ".progress.track")
+            .position(0.0f, kTrackY).size(width, kTrackHeight)
+            .color({1.0f, 1.0f, 1.0f, 0.20f}).radius(kTrackHeight * 0.5f).build();
+        if (fraction > 0.0f) {
+            ui.rect("cell" + std::to_string(entryId) + ".progress.fill")
+                .position(0.0f, kTrackY)
+                .size(std::max(kTrackHeight, width * fraction), kTrackHeight)
+                .color(kAccent).radius(kTrackHeight * 0.5f).build();
+        }
+        if (entry.progressPreviewActive) {
+            const float marker = width * entry.progressPreviewFraction;
+            ui.rect("cell" + std::to_string(entryId) + ".progress.preview.mark")
+                .position(marker - 1.0f, kTrackY - 2.0f).size(2.0f, kTrackHeight + 4.0f)
+                .color(kWhite).build();
+        }
+        ui.rect("cell" + std::to_string(entryId) + ".progress.knob")
+            .position(width * fraction - kKnobSize * 0.5f,
+                      (kHeight - kKnobSize) * 0.5f)
+            .size(kKnobSize, kKnobSize).radius(kKnobSize * 0.5f)
+            .color(kTextPrimary).build();
+        ui.rect("cell" + std::to_string(entryId) + ".progress.hit")
+            .size(width, kHeight)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .acceptedButtons(eui::PointerButton::Left)
+            .onPress([entryId, width](const core::PointerEvent& event,
+                                      const core::Rect& bounds) {
+                ImageEntry* target = findEntry(entryId);
+                if (target == nullptr || !target->video || bounds.width <= 0.0f) return;
+                const float fraction = std::clamp(
+                    static_cast<float>((event.x - bounds.x) / bounds.width), 0.0f, 1.0f);
+                target->videoControlsInteracting = true;
+                target->progressDragStartFraction = fraction;
+                seekVideoFraction(entryId, fraction);
+                target->progressPreviewActive = true;
+                target->video->requestPreview(target->progressPreviewTime);
+                app::requestUpdate();
+            })
+            .onDrag([entryId, width](const core::dsl::DragEvent& event) {
+                if (event.button != eui::PointerButton::Left) return;
+                ImageEntry* target = findEntry(entryId);
+                if (target == nullptr || !target->video) return;
+                const float scale = imview::frame::dpiScale();
+                const float delta = scale > 0.0f
+                    ? static_cast<float>(event.totalX) / scale / std::max(1.0f, width)
+                    : 0.0f;
+                previewVideoFraction(entryId,
+                    target->progressDragStartFraction + delta);
+            })
+            .onRelease([entryId](const core::PointerEvent& event, const core::Rect&) {
+                if (event.button != eui::PointerButton::Left) return;
+                ImageEntry* target = findEntry(entryId);
+                if (target == nullptr || !target->video) return;
+                target->videoControlsInteracting = false;
+                seekVideoFraction(entryId, target->progressPreviewFraction);
+                target->progressPreviewActive = false;
+                app::requestUpdate();
+            })
+            .onMove([entryId](const core::PointerEvent& event, const core::Rect& bounds) {
+                if (bounds.width <= 0.0f) return;
+                previewVideoFraction(entryId, std::clamp(
+                    static_cast<float>((event.x - bounds.x) / bounds.width), 0.0f, 1.0f));
+            })
+            .onHover([entryId](bool hovered) {
+                ImageEntry* target = findEntry(entryId);
+                if (target != nullptr && !hovered && !target->videoControlsInteracting) {
+                    target->progressPreviewActive = false;
+                }
+                app::requestUpdate();
+            })
+            .cursor(eui::CursorShape::Arrow).build();
+    }).build();
+}
+
+void composeVideoControls(eui::Ui& ui, ImageEntry& entry,
+                          const imview::video::Status& status,
+                          float x, float y, float width, float height) {
+    const float barHeight = videoBarHeight(height);
+    const float barY = y + height - barHeight;
+    const int entryId = entry.id;
+    const std::string id = "cell" + std::to_string(entryId);
+    ui.rect(id + ".controls.bg").position(x, barY).size(width, barHeight)
+        .color({0.0f, 0.0f, 0.0f, 0.64f}).build();
+    const float progressX = x + 8.0f;
+    const float progressWidth = std::max(20.0f, width - 16.0f);
+    composeVideoProgress(ui, entry, status, progressX, barY + 3.0f, progressWidth);
+
+    const float rowY = barY + 21.0f;
+    constexpr float kButton = 20.0f;
+    constexpr float kGap = 2.0f;
+    float left = x + 8.0f;
+    composeVideoPlayButton(ui, id + ".control.play", left, rowY, kButton, 18.0f,
+                           status.paused, !status.failed,
+                           [entryId] { toggleVideoPlayback(entryId); });
+    left += kButton + kGap;
+    composeVideoSeekButton(ui, id + ".control.back", left, rowY, kButton, 18.0f,
+                           false, !status.failed, [entryId] {
+                               seekVideoBy(entryId, -5.0);
+                           });
+    left += kButton + kGap;
+    composeVideoSeekButton(ui, id + ".control.forward", left, rowY, kButton, 18.0f,
+                           true, !status.failed, [entryId] {
+                               seekVideoBy(entryId, 5.0);
+                           });
+    left += kButton + kGap;
+
+    constexpr float kTrackWidth = 22.0f;
+    constexpr float kCcWidth = 18.0f;
+    const float right = x + width - 8.0f;
+    const float ccX = right - kCcWidth;
+    const float subtitleX = ccX - kGap - kTrackWidth;
+    const float audioX = subtitleX - kGap - kTrackWidth;
+    const float videoX = audioX - kGap - kTrackWidth;
+    const float timeX = left;
+    const float timeWidth = std::max(0.0f, videoX - 6.0f - timeX);
+
+    if (timeWidth >= 30.0f) {
+        std::string time = formatVideoTime(status.position);
+        if (status.duration > 0.0) time += " / " + formatVideoTime(status.duration);
+        composeClippedText(ui, id + ".control.time", timeX, rowY, timeWidth, 18.0f,
+                           time, kTextSecondary, 10.5f);
+    }
+
+    const auto cycleVideoTrack = [entryId, status] {
+        if (ImageEntry* target = findEntry(entryId)) {
+            if (target->video && status.videoTrackCount > 1) {
+                target->video->setVideoTrack(
+                    (status.videoTrack + 1) % status.videoTrackCount);
+            }
+        }
+    };
+    const auto cycleAudioTrack = [entryId, status] {
+        if (ImageEntry* target = findEntry(entryId)) {
+            if (target->video && status.audioTrackCount > 1) {
+                target->video->setAudioTrack(
+                    (status.audioTrack + 1) % status.audioTrackCount);
+            }
+        }
+    };
+    const auto cycleSubtitleTrack = [entryId, status] {
+        if (ImageEntry* target = findEntry(entryId)) {
+            if (target->video && status.subtitleTrackCount > 1) {
+                target->video->setSubtitleTrack(
+                    (status.subtitleTrack + 1) % status.subtitleTrackCount);
+            }
+        }
+    };
+    const std::string videoLabel = status.videoTrackCount > 0
+        ? "V" + std::to_string(status.videoTrack + 1) : "V-";
+    const std::string audioLabel = status.audioTrackCount > 0
+        ? "A" + std::to_string(status.audioTrack + 1) : "A-";
+    const std::string subtitleLabel = status.subtitleTrackCount > 0 &&
+                                      status.subtitleTrack >= 0
+        ? "S" + std::to_string(status.subtitleTrack + 1) : "S-";
+
+    composeVideoTextButton(ui, id + ".control.vtrack", videoX, rowY,
+                           kTrackWidth, 18.0f, videoLabel, false,
+                           status.videoTrackCount > 1, cycleVideoTrack);
+    composeVideoTextButton(ui, id + ".control.atrack", audioX, rowY,
+                           kTrackWidth, 18.0f, audioLabel, false,
+                           status.audioTrackCount > 1, cycleAudioTrack);
+    composeVideoTextButton(ui, id + ".control.strack", subtitleX, rowY,
+                           kTrackWidth, 18.0f, subtitleLabel, false,
+                           status.subtitleTrackCount > 1, cycleSubtitleTrack);
+    composeVideoTextButton(ui, id + ".control.cc", ccX, rowY, kCcWidth, 18.0f,
+                           "CC", status.hasSubtitles && status.subtitlesEnabled,
+                           status.hasSubtitles, [entryId] {
+                               if (ImageEntry* target = findEntry(entryId)) {
+                                   if (target->video) target->video->toggleSubtitles();
+                               }
+                           });
+}
+
+void composeVideoPreview(eui::Ui& ui, ImageEntry& entry,
+                         const imview::video::Status& status,
+                         float x, float y, float width, float height) {
+    if (!entry.progressPreviewActive || !entry.video) return;
+    const auto stream = entry.video->previewStream();
+    if (!stream) return;
+    const float barHeight = videoBarHeight(height);
+    const float previewWidth = std::min(160.0f, std::max(60.0f, width - 16.0f));
+    const float previewHeight = previewWidth * 9.0f / 16.0f;
+    const float previewX = x + std::clamp(
+        entry.progressPreviewFraction * width - previewWidth * 0.5f,
+        4.0f, std::max(4.0f, width - previewWidth - 4.0f));
+    const float previewY = std::max(
+        y + 4.0f, y + height - barHeight - previewHeight - 22.0f);
+    const std::string id = "cell" + std::to_string(entry.id) + ".preview";
+    ui.rect(id + ".bg").position(previewX, previewY)
+        .size(previewWidth, previewHeight + 18.0f)
+        .color({0.0f, 0.0f, 0.0f, 0.82f}).radius(3.0f).build();
+    ui.image(id + ".image").position(previewX, previewY)
+        .size(previewWidth, previewHeight).stream(stream)
+        .fit(eui::ImageFit::Contain).build();
+    ui.text(id + ".time").position(previewX, previewY + previewHeight)
+        .size(previewWidth, 18.0f)
+        .text(formatVideoTime(entry.progressPreviewTime))
+        .color(kTextPrimary).fontSize(10.0f)
+        .horizontalAlign(eui::HorizontalAlign::Center)
+        .verticalAlign(eui::VerticalAlign::Center).build();
+    (void)status;
+}
+
+void composeVideoSubtitle(eui::Ui& ui, ImageEntry& entry,
+                          const imview::video::Status& status,
+                          float x, float y, float width, float height,
+                          bool controlsVisible) {
+    if (!status.hasSubtitles || !status.subtitlesEnabled || status.subtitle.empty()) return;
+    const float barHeight = controlsVisible ? videoBarHeight(height) : 0.0f;
+    const float bottom = y + height - barHeight - 10.0f;
+    const float textHeight = std::min(58.0f, std::max(28.0f, height * 0.24f));
+    const float textY = std::max(y + 4.0f, bottom - textHeight);
+    const std::string id = "cell" + std::to_string(entry.id) + ".subtitle";
+    const float textWidth = std::max(20.0f, width - 24.0f);
+    const float textX = x + 12.0f;
+    const float outline = 1.15f;
+    const std::array<std::array<float, 2>, 8> offsets = {{
+        {{-outline, 0.0f}}, {{outline, 0.0f}},
+        {{0.0f, -outline}}, {{0.0f, outline}},
+        {{-outline, -outline}}, {{outline, -outline}},
+        {{-outline, outline}}, {{outline, outline}},
+    }};
+    for (std::size_t index = 0; index < offsets.size(); ++index) {
+        ui.text(id + ".outline" + std::to_string(index))
+            .position(textX + offsets[index][0], textY + offsets[index][1])
+            .size(textWidth, textHeight)
+            .text(status.subtitle).color({0.0f, 0.0f, 0.0f, 1.0f})
+            .fontSize(12.0f).wrap(true).lineHeight(15.0f)
+            .horizontalAlign(eui::HorizontalAlign::Center)
+            .verticalAlign(eui::VerticalAlign::Center).build();
+    }
+    ui.text(id + ".text").position(textX, textY)
+        .size(textWidth, textHeight)
+        .text(status.subtitle).color(kWhite)
+        .fontSize(12.0f).wrap(true).lineHeight(15.0f)
+        .horizontalAlign(eui::HorizontalAlign::Center)
+        .verticalAlign(eui::VerticalAlign::Center).build();
+}
+
+void composeVideoCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
+                      float width, float height) {
+    const std::string id = "cell" + std::to_string(entry.id);
+    const float border = crispLine(kCellBorderWidth);
+    const float innerX = border;
+    const float innerY = border;
+    const float innerWidth = std::max(1.0f, width - 2.0f * border);
+    const float innerHeight = std::max(1.0f, height - 2.0f * border);
+    entry.cellX = x;
+    entry.cellY = y;
+    entry.cellW = width;
+    entry.cellH = height;
+
+    const imview::video::Status status = entry.video ? entry.video->status()
+                                                     : imview::video::Status{};
+    const bool inGrid = !state().reviewMode && !soloActive();
+    const bool moveSource = state().moveSourceId == entry.id;
+    const bool moveTarget = state().moveTargetId == entry.id;
+    const bool buttonHot = pointerInButtonHotZone(entry);
+    const bool showCloseButton = inGrid && (buttonHot || moveSource);
+    const bool showMoveButton = inGrid && state().images.size() > 1 &&
+                                (buttonHot || moveSource);
+    // The video cell is its own controls hot zone: entering it reveals the
+    // transport, leaving it hides the transport again.
+    const bool controlsVisible = buttonHot || entry.videoControlsInteracting;
+
+    ui.stack(id).position(x, y).size(width, height).clip().content([&] {
+        ui.rect(id + ".bg").size(width, height).color({0.0f, 0.0f, 0.0f, 1.0f})
+            .border(border, kBorder).build();
+        const auto stream = entry.video ? entry.video->stream() : nullptr;
+        if (stream) {
+            ui.image(id + ".img").position(innerX, innerY)
+                .size(innerWidth, innerHeight).stream(stream)
+                .fit(eui::ImageFit::Contain).build();
+        }
+        if (moveSource || moveTarget) {
+            ui.rect(id + ".move.frame").size(width, height)
+                .color(moveTarget ? eui::Color{0.0f, 0.471f, 0.831f, 0.18f}
+                                  : eui::Color{0.0f, 0.0f, 0.0f, 0.0f})
+                .border(crispLine(2.0f), kAccent).build();
+        }
+        if (status.failed) {
+            ui.text(id + ".error").size(width, height)
+                .text("Cannot play this video").color(kError).fontSize(13.0f)
+                .horizontalAlign(eui::HorizontalAlign::Center)
+                .verticalAlign(eui::VerticalAlign::Center).build();
+            composeClippedText(ui, id + ".reason", 16.0f, height * 0.5f + 18.0f,
+                               std::max(1.0f, width - 32.0f), 20.0f,
+                               status.error, kTextSecondary, 10.5f,
+                               eui::HorizontalAlign::Center);
+        } else if (!status.hasFrame) {
+            ui.text(id + ".loading").size(width, height)
+                .text("Opening video...").color(kTextSecondary).fontSize(12.0f)
+                .horizontalAlign(eui::HorizontalAlign::Center)
+                .verticalAlign(eui::VerticalAlign::Center).build();
+        }
+
+        composeVideoSubtitle(ui, entry, status, innerX, innerY, innerWidth,
+                             innerHeight, controlsVisible);
+
+        // Full-cell hit area: click toggles playback; moving into the cell
+        // requests a compose so the hot-zone controls can appear.
+        ui.rect(id + ".hit").size(width, height)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .onClick([entryId = entry.id] {
+                toggleVideoPlayback(entryId);
+            })
+            .onPress([entryId = entry.id](const core::PointerEvent& event, const core::Rect&) {
+                if (event.button != eui::PointerButton::Left) return;
+                state().activeVideoId = entryId;
+            })
+            .onHover([entryId = entry.id](bool hovered) {
+                if (hovered) state().activeVideoId = entryId;
+                app::requestUpdate();
+            })
+            .cursor(eui::CursorShape::Arrow).build();
+
+        // Hot zones sit above the hit area. The bottom one reveals the video
+        // transport; the corner one reveals close/move.
+        ui.rect(id + ".hot.controls")
+            .position(innerX, innerY + std::max(0.0f, innerHeight - 74.0f))
+            .size(innerWidth, std::min(74.0f, innerHeight))
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .onClick([entryId = entry.id] {
+                toggleVideoPlayback(entryId);
+            })
+            .onHover([entryId = entry.id](bool hovered) {
+                if (hovered) state().activeVideoId = entryId;
+                app::requestUpdate();
+            })
+            .cursor(eui::CursorShape::Arrow).build();
+
+        if (controlsVisible && !status.failed) {
+            composeVideoPreview(ui, entry, status, innerX, innerY, innerWidth,
+                                innerHeight);
+            composeVideoControls(ui, entry, status, innerX, innerY, innerWidth,
+                                 innerHeight);
+        }
+
+        if (showCloseButton) {
+            constexpr float kButtonSize = 18.0f;
+            constexpr float kButtonGap = 2.0f;
+            constexpr float kButtonMargin = 6.0f;
+            float buttonX = innerWidth - kButtonMargin - kButtonSize;
+            const float buttonY = kButtonMargin;
+            composeCellButton(ui, id + ".close", buttonX, buttonY, 0, false,
+                              [entryId = entry.id] { removeImage(entryId); }, {}, {},
+                              [](bool) { app::requestUpdate(); });
+            buttonX -= kButtonSize + kButtonGap;
+            if (showMoveButton) {
+                composeCellButton(
+                    ui, id + ".move", buttonX, buttonY, 1, moveSource,
+                    [entryId = entry.id] {
+                        state().moveSourceId = entryId;
+                        state().moveTargetId = -1;
+                        app::requestUpdate();
+                    },
+                    [entryId = entry.id](float pointerX, float pointerY) {
+                        if (state().moveSourceId != entryId) return;
+                        const int under = cellAt(pointerX, pointerY);
+                        const int target = under == entryId ? -1 : under;
+                        if (target != state().moveTargetId) {
+                            state().moveTargetId = target;
+                            app::requestUpdate();
+                        }
+                    },
+                    [] { finishMove(); },
+                    [](bool) { app::requestUpdate(); });
+            }
+        }
+    }).build();
 }
 
 void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
                  float width, float height,
                  const std::shared_ptr<eui::ImageStream>& streamOverride = nullptr,
                  ImageEntry* sourceOverride = nullptr) {
+    if (entry.isVideo && streamOverride == nullptr && sourceOverride == nullptr) {
+        composeVideoCell(ui, entry, x, y, width, height);
+        return;
+    }
     const std::string id = "cell" + std::to_string(entry.id);
     const float zoom = state().zoom;
     ImageEntry& source = sourceOverride != nullptr ? *sourceOverride : entry;
@@ -2604,12 +3789,17 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
     // Cell buttons: close and move only in the normal grid. Review mode keeps
     // its pair fixed, and solo view shows a single image with no neighbour, so
     // neither button exists in those states. Move also needs a second cell.
+    // Both buttons auto-hide and appear only while the pointer is in the
+    // top-right hot zone (or while a move is armed).
     const bool inGrid = !state().reviewMode && !soloActive();
-    const bool showCloseButton = inGrid;
-    const bool showMoveButton = inGrid && state().images.size() > 1;
+    const bool buttonHot = pointerInButtonHotZone(entry);
+    const bool showCloseButton = inGrid && (buttonHot || moveSource);
+    const bool showMoveButton = inGrid && state().images.size() > 1 &&
+                                (buttonHot || moveSource);
 
-    // The histogram starts below the corner buttons when they are drawn.
-    const bool topCornerFree = !(showCloseButton || showMoveButton);
+    // Reserve the top-right corner while the cell buttons can appear, so the
+    // histogram does not jump when they auto-hide.
+    const bool topCornerFree = !inGrid;
 
     // Prefer the app-owned external texture; the shared sampler provides
     // NEAREST filtering while zoomed. Streams remain the fallback on backends
@@ -2704,15 +3894,16 @@ void composeCell(eui::Ui& ui, ImageEntry& entry, float x, float y,
                 .build();
         }
 
-        if (state().showHistogram && entry.hasHistogram) {
+        const bool imageTools = imageToolsEnabled();
+        if (imageTools && state().showHistogram && entry.hasHistogram) {
             composeHistogramOverlay(ui, entry, id, width, topCornerFree);
         }
 
-        if (state().showExif && !entry.exifLines.empty()) {
+        if (imageTools && state().showExif && !entry.exifLines.empty()) {
             composeExifOverlay(ui, entry, id, width);
         }
 
-        if (localMode && entry.hasStats) {
+        if (imageTools && localMode && entry.hasStats) {
             composeStatsOverlay(ui, entry, id, height);
         }
 
@@ -2885,7 +4076,8 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
 
     // Diff mode adds one computed tile. It is counted only for layout here, not
     // in AppState::images, so the four-image cap and review pair stay unchanged.
-    const bool showDiff = state().diffMode && count == 2;
+    const bool showDiff = state().diffMode && count == 2 &&
+                          !state().images[0].isVideo && !state().images[1].isVideo;
     const int layoutCount = count + (showDiff ? 1 : 0);
     const int cols = layoutCount == 1 ? 1 : 2;
     const int rows = (layoutCount + cols - 1) / cols;
@@ -2897,7 +4089,8 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
     // Q cover: the right image is painted in the left cell while held.
     std::shared_ptr<eui::ImageStream> leftCover;
     ImageEntry* leftCoverSource = nullptr;
-    if (state().qSwapActive && count == 2) {
+    if (state().qSwapActive && count == 2 &&
+        !state().images[0].isVideo && !state().images[1].isVideo) {
         leftCover = state().images[1].altStream;
         leftCoverSource = &state().images[1];
     }
@@ -2923,11 +4116,53 @@ void composeGrid(eui::Ui& ui, const eui::Screen& screen) {
 
 // --- sidebar rendering --------------------------------------------------------
 
+void composeAboutIntegrationRow(eui::Ui& ui, const std::string& id,
+                                float x, float y, float width,
+                                const std::string& label, bool checked,
+                                bool enabled, const std::function<void()>& onTap) {
+    constexpr float kHeight = 24.0f;
+    const eui::Color hover = eui::Color{1.0f, 1.0f, 1.0f, 0.06f};
+    ui.stack(id).position(x, y).size(width, kHeight).content([&] {
+        ui.rect(id + ".bg").size(width, kHeight).radius(3.0f)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .states({0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? hover : eui::Color{0.0f, 0.0f, 0.0f, 0.0f},
+                    enabled ? eui::Color{1.0f, 1.0f, 1.0f, 0.12f}
+                            : eui::Color{0.0f, 0.0f, 0.0f, 0.0f})
+            .build();
+        const float boxY = (kHeight - 14.0f) * 0.5f;
+        ui.rect(id + ".box").position(0.0f, boxY).size(14.0f, 14.0f)
+            .radius(2.0f)
+            .color(checked ? kAccent : eui::Color{0.0f, 0.0f, 0.0f, 0.0f})
+            .border(crispLine(1.0f), checked ? kAccent : kBorderStrong)
+            .build();
+        if (checked) {
+            ui.text(id + ".check").position(0.0f, boxY - 1.0f)
+                .size(14.0f, 14.0f).text("\xE2\x9C\x93")
+                .color(kWhite).fontSize(10.0f)
+                .horizontalAlign(eui::HorizontalAlign::Center)
+                .verticalAlign(eui::VerticalAlign::Center).build();
+        }
+        ui.text(id + ".label").position(22.0f, 0.0f)
+            .size(std::max(0.0f, width - 22.0f), kHeight)
+            .text(label)
+            .color(enabled ? kTextPrimary
+                           : eui::Color{1.0f, 1.0f, 1.0f, 0.32f})
+            .fontSize(11.0f)
+            .verticalAlign(eui::VerticalAlign::Center).build();
+        ui.rect(id + ".hit").size(width, kHeight)
+            .color({0.0f, 0.0f, 0.0f, 0.0f})
+            .onClick(enabled ? onTap : std::function<void()>{})
+            .cursor(enabled ? eui::CursorShape::Hand : eui::CursorShape::Arrow)
+            .build();
+    }).build();
+}
+
 void composeAboutDialog(eui::Ui& ui, const eui::Screen& screen) {
     if (!state().aboutOpen) return;
 
-    const float width = std::min(480.0f, screen.width - 32.0f);
-    const float height = std::min(300.0f, screen.height - 32.0f);
+    const float width = std::min(540.0f, screen.width - 32.0f);
+    const float height = std::min(470.0f, screen.height - 32.0f);
     const float x = snapToPixel((screen.width - width) * 0.5f);
     const float y = snapToPixel((screen.height - height) * 0.5f);
     const float innerX = 24.0f;
@@ -2952,17 +4187,39 @@ void composeAboutDialog(eui::Ui& ui, const eui::Screen& screen) {
             .color(kTextSecondary).fontSize(11.0f).build();
         ui.text("about.body").position(innerX, 78.0f)
             .size(innerW, 40.0f)
-            .text("A Windows desktop viewer for comparing images side by side. "
-                  "Zoom and pan up to four images together, and inspect regions "
-                  "numerically.")
+            .text("A Windows desktop viewer for comparing images side by side "
+                  "and playing videos. Zoom and pan up to four images together, "
+                  "and inspect regions numerically.")
             .color(kTextPrimary).fontSize(11.0f).wrap(true)
             .lineHeight(16.0f).build();
-        ui.text("about.project.label").position(innerX, 132.0f)
+        ui.text("about.project.label").position(innerX, 126.0f)
             .size(innerW, 16.0f).text("PROJECT HOMEPAGE")
             .color(kTextSecondary).fontSize(10.0f).build();
-        composeClippedText(ui, "about.project", innerX, 150.0f,
+        composeClippedText(ui, "about.project", innerX, 144.0f,
                            innerW, 18.0f, kProjectUrl, kAccent, 11.0f);
-        ui.text("about.license").position(innerX, 182.0f)
+        ui.text("about.integration.label").position(innerX, 176.0f)
+            .size(innerW, 16.0f)
+            .text("DEFAULT APPS / EXPLORER")
+            .color(kTextSecondary).fontSize(10.0f).build();
+        composeAboutIntegrationRow(
+            ui, "about.integration.images", innerX, 196.0f, innerW,
+            "Images — Default app candidate",
+            state().integrationImages, true, [] { toggleImageIntegration(); });
+#if IMVIEW_ENABLE_VIDEO
+        composeAboutIntegrationRow(
+            ui, "about.integration.videos", innerX, 224.0f, innerW,
+            "Videos — Default app candidate",
+            state().integrationVideos, true, [] { toggleVideoIntegration(); });
+#endif
+        const std::string contextLabel = state().integrationContextAvailable
+            ? "Right-click — Open with ImView (new window)"
+            : "Right-click — unavailable in this build";
+        composeAboutIntegrationRow(
+            ui, "about.integration.context", innerX, 252.0f, innerW,
+            contextLabel, state().integrationContextMenu,
+            state().integrationContextAvailable,
+            [] { toggleContextMenuIntegration(); });
+        ui.text("about.license").position(innerX, 288.0f)
             .size(innerW, 16.0f)
             .text("Released into the public domain under the Unlicense.")
             .color(kTextSecondary).fontSize(10.5f).build();
@@ -2982,7 +4239,7 @@ void composeContextMenu(eui::Ui& ui, const eui::Screen& screen) {
     const float menuWidth = openMenu ? 196.0f : 210.0f;
     const char* rowLabels[] = {"Open", "Add to main window", "Show in Explorer",
                                "Open with...", "Properties"};
-    const char* openLabels[] = {"Open images...", "Open folder...", "Toggle sidebar",
+    const char* openLabels[] = {"Open...", "Open folder...", "Toggle sidebar",
                                 "About"};
     const char* rowHints[] = {"", "", "", "", ""};
     const char* openHints[] = {"Ctrl+O", "Ctrl+Shift+O", "Ctrl+B", ""};
@@ -3092,9 +4349,11 @@ void composeSidebarRow(eui::Ui& ui, int paneIndex, const AppState::FolderPane& p
         const std::string rowId = paneId + ".row" + std::to_string(index);
         const bool rowSelected = isSelected(paneIndex, index);
         const bool open = isOpenInGrid(pane.paths[static_cast<std::size_t>(index)]);
+        const bool video = index < static_cast<int>(pane.videos.size()) &&
+                           pane.videos[static_cast<std::size_t>(index)];
         ui.stack(rowId).position(0.0f, rowY)
             .size(width, kSidebarRowHeight)
-            .content([&, index, rowSelected, open, rowId, width] {
+            .content([&, index, rowSelected, open, video, rowId, width] {
                 const eui::Color base = rowSelected
                     ? eui::Color{0.043f, 0.231f, 0.376f, 1.0f}
                     : eui::Color{0.0f, 0.0f, 0.0f, 0.0f};
@@ -3103,13 +4362,30 @@ void composeSidebarRow(eui::Ui& ui, int paneIndex, const AppState::FolderPane& p
                     : eui::Color{1.0f, 1.0f, 1.0f, 0.055f};
                 ui.rect(rowId + ".bg").size(width, kSidebarRowHeight)
                     .color(base).states(base, hover, hover).build();
+                if (video) {
+                    ui.polygon(rowId + ".icon")
+                        .position(6.0f, 7.0f).size(8.0f, 8.0f)
+                        .points({{0.0f, 0.0f}, {8.0f, 4.0f}, {0.0f, 8.0f}})
+                        .color(rowSelected ? kWhite : kTextSecondary).build();
+                } else {
+                    ui.rect(rowId + ".icon.frame")
+                        .position(5.0f, 7.0f).size(10.0f, 8.0f)
+                        .color({0.0f, 0.0f, 0.0f, 0.0f})
+                        .border(1.0f, rowSelected ? kWhite : kTextSecondary)
+                        .radius(1.0f).build();
+                    ui.polygon(rowId + ".icon.mountain")
+                        .position(6.0f, 11.0f).size(8.0f, 3.0f)
+                        .points({{0.0f, 3.0f}, {2.5f, 0.5f}, {4.0f, 2.0f},
+                                 {5.5f, 1.0f}, {8.0f, 3.0f}})
+                        .color(rowSelected ? kWhite : kTextSecondary).build();
+                }
                 if (open) {
                     ui.rect(rowId + ".dot")
-                        .position(4.0f, kSidebarRowHeight * 0.5f - 2.0f)
+                        .position(18.0f, kSidebarRowHeight * 0.5f - 2.0f)
                         .size(4.0f, 4.0f).radius(2.0f).color(kAccent).build();
                 }
-                ui.text(rowId + ".name").position(14.0f, 0.0f)
-                    .size(width - 22.0f, kSidebarRowHeight)
+                ui.text(rowId + ".name").position(26.0f, 0.0f)
+                    .size(width - 34.0f, kSidebarRowHeight)
                     .text(pane.names[static_cast<std::size_t>(index)])
                     .color(rowSelected ? kWhite
                                        : (open ? kTextPrimary : kTextSecondary))
@@ -3283,7 +4559,7 @@ void composeSidebar(eui::Ui& ui, const eui::Screen& screen) {
             if (count == 0) {
                 ui.text(paneId + ".empty").position(10.0f, listTop + 10.0f)
                     .size(width - 20.0f, 36.0f)
-                    .text("No images in folder").color(kTextSecondary).fontSize(11.5f)
+                    .text("No media in folder").color(kTextSecondary).fontSize(11.5f)
                     .build();
             }
 
@@ -3401,12 +4677,23 @@ void composeDropHighlight(eui::Ui& ui, const eui::Screen& screen, float sidebarW
 // NOTE: must have external linkage; EUI's entry point calls it via
 // qualified name lookup from another translation unit.
 void compose(eui::Ui& ui, const eui::Screen& screen) {
+    // Keep sync availability and the one-playing-video rule true even after
+    // asynchronous opens or a video reaching its end.
+    enforceSyncAvailability();
+    enforcePlaybackRules();
+    // The native Windows move loop blocks EUI's frame loop. With a video in the
+    // grid, the toolbar drag surface drives a normal client-side move instead,
+    // so decoded frames keep being composed while the window follows the mouse.
+    imview::frame::setCustomTitleBarDrag(hasVideoMedia());
     // Refreshes the computed diff (pair or threshold changed) before the grid
     // asks for its texture.
     updateDiffImage();
     // The threshold slider extends the left control cluster; without this the
     // native caption band would swallow its drags.
-    imview::frame::setTitleBarLeftControlsWidth(state().diffMode ? 270.0f : 80.0f);
+    const float leftControlsWidth = state().diffMode
+        ? 270.0f
+        : (hasVideoMedia() ? 302.0f : 80.0f);
+    imview::frame::setTitleBarLeftControlsWidth(leftControlsWidth);
     const float sidebarWidth = sidebarWidthFor(screen.width);
     imview::frame::setSidebarSplitter(
         state().sidebarVisible && !state().menuOpen && !state().aboutOpen
@@ -3415,7 +4702,6 @@ void compose(eui::Ui& ui, const eui::Screen& screen) {
     ui.stack("root").size(screen.width, screen.height)
         .cursor(eui::CursorShape::Arrow)
         .content([&] {
-            // The main area stays blank while no image is open.
             if (!state().images.empty()) {
                 composeGrid(ui, screen);
             }
@@ -3441,15 +4727,42 @@ const DslAppConfig& dslAppConfig() {
         .decorated(false)  // borderless: ImView draws its own title bar
         .fps(120.0)
         .onStart([] {
-            // 36px title bar; the left 80px holds the ImView menu button and the
-            // right 260px holds the toggles and window buttons.
+            const LaunchRequest request = launchRequest();
+            // Serialize the forward-or-create decision so two Explorer launches
+            // cannot both decide that no window exists.
+            imview::frame::lockInstanceStartup();
+            // Explorer double-click: add to the newest window that still has
+            // room. The context-menu DLL uses --new-window, which bypasses this
+            // path and always creates a fresh window.
+            if (!request.newWindow && !request.paths.empty() &&
+                imview::frame::forwardOpenPaths(request.paths)) {
+                imview::frame::unlockInstanceStartup();
+                imview::frame::closeWindow();
+                return;
+            }
+
+            // 36px title bar; the left cluster holds the menu, optional volume
+            // or diff slider, and the right cluster holds the mode chips and
+            // window buttons.
             installImageSampler();
             imview::frame::setFileDropHandler(handleFileDrop);
-            imview::frame::installBorderlessWindow(kToolbarHeight, 80.0f, 260.0f);
+            imview::frame::installBorderlessWindow(kToolbarHeight, 80.0f, 300.0f);
             imview::frame::centerWindow();
-            addPaths(launchArgs());
+            imview::frame::setOpenPathsHandler(handleExternalOpen);
+
+            if (!request.paths.empty()) {
+                const std::string folder = launchFolder(request.paths);
+                if (!folder.empty()) addFolder(folder);
+            }
+            // New windows started with media keep the sidebar and add every
+            // requested file to the grid.
+            addPaths(request.paths, false, false, true);
+            imview::frame::unlockInstanceStartup();
         })
         .onShutdown([] {
+            // Stop all decoders before the renderer loses its device.
+            shutdownMedia();
+            imview::frame::shutdownWindowMessaging();
             imview::frame::shutdownFileDrop();
 #if defined(EUI_RENDER_BACKEND_OPENGL)
             shutdownImageSampler();
@@ -3465,6 +4778,38 @@ const DslAppConfig& dslAppConfig() {
                     closeAboutDialog();
                 }
                 return;
+            }
+            // The video that last received pointer attention receives the
+            // transport shortcuts. Space stays as review-next in review mode.
+            if (ImageEntry* activeVideo = findEntry(activeVideoId())) {
+                if (activeVideo->video && activeVideo->isVideo &&
+                    (event.action == eui::KeyAction::Press ||
+                     event.action == eui::KeyAction::Repeat)) {
+                    if (event.key == eui::InputKey::Left &&
+                        event.modifiers.control) {
+                        stepVideoFrames(activeVideo->id, -1);
+                        return;
+                    }
+                    if (event.key == eui::InputKey::Right &&
+                        event.modifiers.control) {
+                        stepVideoFrames(activeVideo->id, 1);
+                        return;
+                    }
+                    if (event.key == eui::InputKey::Left) {
+                        seekVideoBy(activeVideo->id, -5.0);
+                        return;
+                    }
+                    if (event.key == eui::InputKey::Right) {
+                        seekVideoBy(activeVideo->id, 5.0);
+                        return;
+                    }
+                    if (event.key == eui::InputKey::Space &&
+                        !state().reviewMode &&
+                        event.action == eui::KeyAction::Press) {
+                        toggleVideoPlayback(activeVideo->id);
+                        return;
+                    }
+                }
             }
             if (event.action == eui::KeyAction::Press) {
                 if (soloActive()) {

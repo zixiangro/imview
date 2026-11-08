@@ -1,3 +1,7 @@
+#ifndef IMVIEW_ENABLE_VIDEO
+#define IMVIEW_ENABLE_VIDEO 1
+#endif
+
 // Logic tests for the parts that do not need a window: UTF-8 helpers, the EXIF
 // reader and the image decoder. Fixtures are generated in code, so the
 // repository carries no binary test data.
@@ -11,6 +15,7 @@
 #include <vector>
 
 #include "exif.h"
+#include "media_paths.h"
 #include "stb_wrap.h"
 #include "utf8.h"
 
@@ -265,6 +270,27 @@ void testExifMissing() {
     CHECK(!imview::readExif(tempPath("imview_does_not_exist.jpg").u8string()).any());
 }
 
+void testMediaPaths() {
+    CHECK(imview::media::isImagePath("photo.PNG"));
+    CHECK(imview::media::isImagePath("folder\\image.JpEg"));
+    CHECK(imview::media::isImagePath("animation.gif"));
+    CHECK(!imview::media::isVideoPath("animation.gif"));
+
+#if IMVIEW_ENABLE_VIDEO
+    CHECK(imview::media::isVideoPath("clip.MP4"));
+    CHECK(imview::media::isVideoPath("folder\\movie.MkV"));
+    CHECK(imview::media::isVideoPath("sample.webm"));
+    CHECK(imview::media::isVideoPath("\xE8\xA7\x86\xE9\xA2\x91.MP4")); // 视频.MP4
+#else
+    CHECK(!imview::media::isVideoPath("clip.MP4"));
+#endif
+
+    CHECK(!imview::media::isImagePath("clip.mp4"));
+    CHECK(!imview::media::isVideoPath("photo.png"));
+    CHECK(!imview::media::isVideoPath("document.txt"));
+    CHECK(!imview::media::isImagePath("no_extension"));
+}
+
 void testDecode() {
     const std::filesystem::path path = tempPath("imview_test.bmp");
     writeBytes(path, makeBmp());
@@ -299,6 +325,7 @@ int main() {
     testExifJpeg();
     testExifPng();
     testExifMissing();
+    testMediaPaths();
     testDecode();
 
     std::printf("%d checks, %d failures\n", gChecks, gFailures);

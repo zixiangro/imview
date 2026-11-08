@@ -1,6 +1,12 @@
 #include "shell_actions.h"
 
+#include "media_paths.h"
+#include "shell_menu_id.h"
 #include "utf8.h"
+
+#ifndef IMVIEW_ENABLE_VIDEO
+#define IMVIEW_ENABLE_VIDEO 1
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -32,6 +38,156 @@ namespace {
 #if defined(_WIN32)
 
 // ShellExecuteEx helper shared by the "open with" and "properties" actions.
+bool setRegistryString(HKEY root, const std::wstring& subkey,
+                       const wchar_t* valueName, const std::wstring& value) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(root, subkey.c_str(), 0, nullptr, 0,
+                        KEY_SET_VALUE | KEY_CREATE_SUB_KEY, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    const std::wstring data = value;
+    const DWORD bytes = static_cast<DWORD>((data.size() + 1) * sizeof(wchar_t));
+    const LSTATUS status = RegSetValueExW(
+        key, valueName, 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(data.c_str()), bytes);
+    RegCloseKey(key);
+    return status == ERROR_SUCCESS;
+}
+
+bool deleteRegistryKey(HKEY root, const std::wstring& subkey) {
+    const LSTATUS status = RegDeleteTreeW(root, subkey.c_str());
+    return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND ||
+           status == ERROR_PATH_NOT_FOUND;
+}
+
+bool deleteRegistryValue(HKEY root, const std::wstring& subkey,
+                         const wchar_t* valueName) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, subkey.c_str(), 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+        return true;
+    }
+    const LSTATUS status = RegDeleteValueW(key, valueName);
+    RegCloseKey(key);
+    return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+}
+
+bool registryKeyExists(HKEY root, const std::wstring& subkey) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, subkey.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return false;
+    }
+    RegCloseKey(key);
+    return true;
+}
+
+std::wstring registryString(HKEY root, const std::wstring& subkey,
+                            const wchar_t* valueName) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, subkey.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return {};
+    }
+    DWORD type = 0;
+    DWORD bytes = 0;
+    if (RegQueryValueExW(key, valueName, nullptr, &type, nullptr, &bytes) !=
+            ERROR_SUCCESS ||
+        (type != REG_SZ && type != REG_EXPAND_SZ) || bytes < sizeof(wchar_t)) {
+        RegCloseKey(key);
+        return {};
+    }
+    std::wstring value(bytes / sizeof(wchar_t), L'\0');
+    if (RegQueryValueExW(key, valueName, nullptr, &type,
+                         reinterpret_cast<BYTE*>(value.data()), &bytes) !=
+        ERROR_SUCCESS) {
+        RegCloseKey(key);
+        return {};
+    }
+    RegCloseKey(key);
+    while (!value.empty() && value.back() == L'\0') value.pop_back();
+    return value;
+}
+
+std::wstring guidString(const CLSID& clsid) {
+    wchar_t buffer[64]{};
+    StringFromGUID2(clsid, buffer, static_cast<int>(std::size(buffer)));
+    return buffer;
+}
+
+std::string executableDirectoryUncached();
+
+constexpr int kShellDllResourceId = 101;
+
+std::wstring localAppDataDirectory() {
+    wchar_t buffer[32768]{};
+    const DWORD length = GetEnvironmentVariableW(
+        L"LOCALAPPDATA", buffer, static_cast<DWORD>(std::size(buffer)));
+    if (length == 0 || length >= std::size(buffer)) return {};
+    return std::wstring(buffer, length);
+}
+
+std::wstring contextMenuDllPathW() {
+    const std::wstring root = localAppDataDirectory();
+    if (root.empty()) return {};
+    return (std::filesystem::path(root) / L"ImView" / L"imview_shell.dll").wstring();
+}
+
+std::string contextMenuDllPath() {
+    const std::wstring wide = contextMenuDllPathW();
+    return wide.empty() ? std::string() : imview::utf8::narrow(wide.c_str());
+}
+
+bool embeddedShellDll(const void*& data, DWORD& size) {
+    const HRSRC resource = FindResourceW(
+        nullptr, MAKEINTRESOURCEW(kShellDllResourceId), MAKEINTRESOURCEW(10));
+    if (resource == nullptr) return false;
+    size = SizeofResource(nullptr, resource);
+    if (size == 0) return false;
+    const HGLOBAL loaded = LoadResource(nullptr, resource);
+    if (loaded == nullptr) return false;
+    data = LockResource(loaded);
+    return data != nullptr;
+}
+
+bool extractShellDll() {
+    const void* data = nullptr;
+    DWORD size = 0;
+    if (!embeddedShellDll(data, size)) return false;
+    const std::wstring path = contextMenuDllPathW();
+    if (path.empty()) return false;
+    const std::filesystem::path directory = std::filesystem::path(path).parent_path();
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) return false;
+
+    // Avoid rewriting a file that is already the embedded version (Explorer may
+    // hold it open). A different size means this is an older/newer extraction.
+    const std::filesystem::path filePath(path);
+    error.clear();
+    if (std::filesystem::is_regular_file(filePath, error) &&
+        !error && std::filesystem::file_size(filePath, error) == size && !error) {
+        return true;
+    }
+
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool ok = WriteFile(file, data, size, &written, nullptr) != FALSE &&
+                    written == size;
+    CloseHandle(file);
+    if (!ok) DeleteFileW(path.c_str());
+    return ok;
+}
+
+std::wstring modulePathW() {
+    std::wstring path(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(),
+                                            static_cast<DWORD>(path.size()));
+    if (length == 0 || length >= path.size()) return {};
+    path.resize(length);
+    return path;
+}
+
 bool invokeVerb(const std::string& path, const wchar_t* verb, ULONG mask) {
     const std::wstring widePath = imview::utf8::widen(path);
     if (widePath.empty()) return false;
@@ -291,6 +447,229 @@ bool showProperties(const std::string& path) {
     (void)path;
     return false;
 #endif
+}
+
+namespace {
+
+// Writes the complete media-association state for the requested types. This
+// removes stale entries when one type is turned off, rather than leaving an
+// older registration behind.
+bool syncMediaAssociations(bool images, bool videos) {
+#if defined(_WIN32)
+    videos = videos && IMVIEW_ENABLE_VIDEO != 0;
+    const std::wstring executable = modulePathW();
+    if (executable.empty()) return false;
+    const std::wstring quoted = L"\"" + executable + L"\"";
+    const std::wstring command = quoted + L" \"%1\"";
+    const std::wstring imageProgId = L"ImView.Image";
+    const std::wstring videoProgId = L"ImView.Video";
+    const std::wstring capabilities = L"Software\\ImView\\Capabilities";
+    const std::wstring fileAssociations = capabilities + L"\\FileAssociations";
+
+    // Older versions also created an Applications\imview.exe Open With entry.
+    // The default-app registration uses ProgIDs and capabilities instead.
+    deleteRegistryKey(HKEY_CURRENT_USER,
+                      L"Software\\Classes\\Applications\\imview.exe");
+
+    if (images || videos) {
+        setRegistryString(HKEY_CURRENT_USER, capabilities, L"ApplicationName", L"ImView");
+        setRegistryString(HKEY_CURRENT_USER, capabilities,
+                          L"ApplicationDescription", L"Image and video viewer");
+        setRegistryString(HKEY_CURRENT_USER, capabilities,
+                          L"ApplicationIcon", quoted + L",0");
+        setRegistryString(HKEY_CURRENT_USER, L"Software\\RegisteredApplications",
+                          L"ImView", capabilities);
+    } else {
+        deleteRegistryKey(HKEY_CURRENT_USER, capabilities);
+        deleteRegistryValue(HKEY_CURRENT_USER,
+                            L"Software\\RegisteredApplications", L"ImView");
+    }
+
+    const auto registerProgId = [&](const std::wstring& progId,
+                                    const std::wstring& description) {
+        const std::wstring key = L"Software\\Classes\\" + progId;
+        setRegistryString(HKEY_CURRENT_USER, key, nullptr, description);
+        setRegistryString(HKEY_CURRENT_USER, key + L"\\DefaultIcon",
+                          nullptr, quoted + L",0");
+        setRegistryString(HKEY_CURRENT_USER, key + L"\\shell\\open\\command",
+                          nullptr, command);
+    };
+    const auto removeProgId = [&](const std::wstring& progId) {
+        deleteRegistryKey(HKEY_CURRENT_USER,
+                          L"Software\\Classes\\" + progId);
+    };
+
+    if (images) registerProgId(imageProgId, L"ImView image");
+    else removeProgId(imageProgId);
+    if (videos) registerProgId(videoProgId, L"ImView video");
+    else removeProgId(videoProgId);
+
+    const auto extensionGroup = [&](const std::vector<std::string>& extensions,
+                                    bool enabled, const std::wstring& progId) {
+        for (const auto& extension : extensions) {
+            const std::wstring wideExtension = imview::utf8::widen(extension);
+            // Legacy Open With entries are no longer part of the model. Remove
+            // them so an upgrade leaves only the default-app registration.
+            deleteRegistryValue(
+                HKEY_CURRENT_USER,
+                L"Software\\Classes\\" + wideExtension +
+                    L"\\OpenWithProgids",
+                progId.c_str());
+            if (enabled) {
+                setRegistryString(HKEY_CURRENT_USER, fileAssociations,
+                                  wideExtension.c_str(), progId);
+            } else {
+                deleteRegistryValue(HKEY_CURRENT_USER, fileAssociations,
+                                    wideExtension.c_str());
+            }
+        }
+    };
+    extensionGroup(imview::media::imageExtensions(), images, imageProgId);
+    extensionGroup(imview::media::videoExtensions(), videos, videoProgId);
+
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    return true;
+#else
+    (void)images;
+    (void)videos;
+    return false;
+#endif
+}
+
+} // namespace
+
+bool registerImageAssociations() {
+#if defined(_WIN32)
+    return syncMediaAssociations(true, integrationStatus().videos);
+#else
+    return false;
+#endif
+}
+
+bool unregisterImageAssociations() {
+#if defined(_WIN32)
+    return syncMediaAssociations(false, integrationStatus().videos);
+#else
+    return false;
+#endif
+}
+
+bool registerVideoAssociations() {
+#if defined(_WIN32) && IMVIEW_ENABLE_VIDEO
+    return syncMediaAssociations(integrationStatus().images, true);
+#else
+    return false;
+#endif
+}
+
+bool unregisterVideoAssociations() {
+#if defined(_WIN32) && IMVIEW_ENABLE_VIDEO
+    return syncMediaAssociations(integrationStatus().images, false);
+#else
+    return false;
+#endif
+}
+
+bool registerContextMenu() {
+#if defined(_WIN32)
+    if (!extractShellDll()) return false;
+    const std::string dllPath = contextMenuDllPath();
+    const std::wstring wideDll = imview::utf8::widen(dllPath);
+    const std::wstring executable = modulePathW();
+    if (wideDll.empty() || executable.empty()) return false;
+    const std::wstring clsid = guidString(kImViewContextMenuClsid);
+    const std::wstring clsidKey = L"Software\\Classes\\CLSID\\" + clsid;
+    const std::wstring contextKey = L"Software\\ImView\\ContextMenu";
+    setRegistryString(HKEY_CURRENT_USER, clsidKey, nullptr, L"ImView Explorer menu");
+    setRegistryString(HKEY_CURRENT_USER, clsidKey + L"\\InprocServer32",
+                      nullptr, wideDll);
+    setRegistryString(HKEY_CURRENT_USER, clsidKey + L"\\InprocServer32",
+                      L"ThreadingModel", L"Apartment");
+    // The DLL lives under %LOCALAPPDATA%; tell it where the actual exe is.
+    setRegistryString(HKEY_CURRENT_USER, contextKey, L"ExePath", executable);
+    const wchar_t* handlerKeys[] = {
+        L"Software\\Classes\\*\\shellex\\ContextMenuHandlers\\ImView",
+        L"Software\\Classes\\Directory\\shellex\\ContextMenuHandlers\\ImView",
+    };
+    for (const wchar_t* key : handlerKeys) {
+        setRegistryString(HKEY_CURRENT_USER, key, nullptr, clsid);
+    }
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    return true;
+#else
+    return false;
+#endif
+}
+
+void unregisterContextMenu() {
+#if defined(_WIN32)
+    deleteRegistryKey(
+        HKEY_CURRENT_USER,
+        L"Software\\Classes\\*\\shellex\\ContextMenuHandlers\\ImView");
+    deleteRegistryKey(
+        HKEY_CURRENT_USER,
+        L"Software\\Classes\\Directory\\shellex\\ContextMenuHandlers\\ImView");
+    const std::wstring clsid = guidString(kImViewContextMenuClsid);
+    deleteRegistryKey(HKEY_CURRENT_USER,
+                      L"Software\\Classes\\CLSID\\" + clsid);
+    deleteRegistryKey(HKEY_CURRENT_USER, L"Software\\ImView\\ContextMenu");
+    const std::wstring dllPath = contextMenuDllPathW();
+    if (!dllPath.empty()) {
+        if (DeleteFileW(dllPath.c_str()) == FALSE) {
+            // Explorer may still hold the DLL mapped. Schedule removal on the
+            // next reboot rather than leaving an untracked file forever.
+            MoveFileExW(dllPath.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+        }
+        const std::filesystem::path directory =
+            std::filesystem::path(dllPath).parent_path();
+        std::error_code cleanupError;
+        std::filesystem::remove_all(directory, cleanupError);
+        if (cleanupError) {
+            // The directory is still occupied by the DLL scheduled above.
+            // Schedule the empty-directory removal after the reboot as well.
+            MoveFileExW(directory.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+        }
+    }
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+#endif
+}
+
+IntegrationStatus integrationStatus() {
+    IntegrationStatus status;
+#if defined(_WIN32)
+    status.images = registryKeyExists(
+        HKEY_CURRENT_USER, L"Software\\Classes\\ImView.Image\\shell\\open\\command");
+    status.videos = IMVIEW_ENABLE_VIDEO != 0 && registryKeyExists(
+        HKEY_CURRENT_USER, L"Software\\Classes\\ImView.Video\\shell\\open\\command");
+    const void* embeddedData = nullptr;
+    DWORD embeddedSize = 0;
+    status.contextMenuAvailable = embeddedShellDll(embeddedData, embeddedSize);
+    if (status.contextMenuAvailable) {
+        const std::wstring clsid = guidString(kImViewContextMenuClsid);
+        const std::wstring inproc =
+            L"Software\\Classes\\CLSID\\" + clsid + L"\\InprocServer32";
+        const std::wstring registeredDll = registryString(
+            HKEY_CURRENT_USER, inproc, nullptr);
+        const std::wstring wideDll = contextMenuDllPathW();
+        const bool pathMatches =
+            !wideDll.empty() && _wcsicmp(registeredDll.c_str(), wideDll.c_str()) == 0;
+        const std::wstring registeredExe = registryString(
+            HKEY_CURRENT_USER, L"Software\\ImView\\ContextMenu", L"ExePath");
+        const std::wstring currentExe = modulePathW();
+        const bool exeMatches = !registeredExe.empty() &&
+            _wcsicmp(registeredExe.c_str(), currentExe.c_str()) == 0;
+        const bool fileHandler = registryString(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\*\\shellex\\ContextMenuHandlers\\ImView",
+            nullptr) == clsid;
+        const bool folderHandler = registryString(
+            HKEY_CURRENT_USER,
+            L"Software\\Classes\\Directory\\shellex\\ContextMenuHandlers\\ImView",
+            nullptr) == clsid;
+        status.contextMenu = pathMatches && exeMatches && fileHandler && folderHandler;
+    }
+#endif
+    return status;
 }
 
 std::string executableDirectory() {

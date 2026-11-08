@@ -68,11 +68,10 @@ inline std::string narrow(const wchar_t* text) {
     return narrowText;
 }
 
-// Re-decodes bytes that came from a console code page (GBK on Chinese Windows).
-// Text that is already valid UTF-8 is returned unchanged.
-inline std::string fromConsoleCodePage(const std::string& raw) {
+// Re-decodes bytes from a specific Windows code page. Text that is already
+// valid UTF-8 is returned unchanged.
+inline std::string fromCodePage(const std::string& raw, UINT codePage) {
     if (raw.empty() || isValid(raw)) return raw;
-    const UINT codePage = GetOEMCP();
     const int wideLength = MultiByteToWideChar(codePage, 0, raw.data(),
                                                static_cast<int>(raw.size()), nullptr, 0);
     if (wideLength <= 0) return raw;
@@ -86,6 +85,17 @@ inline std::string fromConsoleCodePage(const std::string& raw) {
     WideCharToMultiByte(CP_UTF8, 0, wide.data(), wideLength, out.data(), utf8Length,
                         nullptr, nullptr);
     return out;
+}
+
+// Re-decodes bytes that came from a console code page (GBK on Chinese Windows).
+// Text that is already valid UTF-8 is returned unchanged.
+inline std::string fromConsoleCodePage(const std::string& raw) {
+    return fromCodePage(raw, GetOEMCP());
+}
+
+// Re-decodes legacy single-byte/multi-byte text using the ANSI code page.
+inline std::string fromAnsiCodePage(const std::string& raw) {
+    return fromCodePage(raw, CP_ACP);
 }
 
 #endif

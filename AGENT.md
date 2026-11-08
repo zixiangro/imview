@@ -8,8 +8,8 @@ local notes in `doc/notes/` hold investigation and rationale.
 
 ImView is a Windows desktop image viewer and comparator built on EUI-NEO. The
 application is C++17: `src/app.cpp` holds the state model and all UI
-composition, and small helpers cover EXIF, decoding, the Win32 shell actions and
-the borderless frame.
+composition, and small helpers cover EXIF, decoding, the Win32 shell actions,
+the opt-in Explorer context-menu DLL and the borderless frame.
 
 Start from [README.md](README.md) for the user-facing picture and
 [doc/architecture.md](doc/architecture.md) for the code map.
@@ -21,7 +21,10 @@ CMakeLists.txt     project definition, wires EUI-NEO and the app sources
 src/               application sources (all first-party code lives here)
 tests/             logic tests for the non-UI parts, built as imview_tests
 doc/               documentation; see "Documentation rules" below
-3rd/EUI-NEO/       dependency, a git submodule (only its commit is tracked)
+tools/             FFmpeg build helper (run manually; CMake does not invoke it)
+                   and local-only diagnostic helpers
+3rd/EUI-NEO/       build dependency, a git submodule (only its commit is tracked)
+3rd/ffmpeg/        FFmpeg source, a git submodule (linked through a static build)
 3rd/THIRD-PARTY-   licence notices for the shipped binary
     NOTICES.md
 build/             build output, NOT tracked
@@ -38,22 +41,28 @@ requirements in [doc/build.md](doc/build.md).
 
 ## Build and run
 
-Build with CMake as described in [doc/build.md](doc/build.md):
+Build the minimal static FFmpeg once, then build with CMake, as described in
+[doc/build.md](doc/build.md):
 
-```sh
+```bat
 git clone --recursive https://github.com/zixiangro/imview.git
+cd imview
+tools\build_ffmpeg.cmd
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-The result is a single self-contained `build/imview.exe`; no runtime assets are
-read from disk.
+The build produces a single `build/imview.exe`. The opt-in Explorer context-menu
+helper is embedded as a resource; enabling the switch extracts it to
+`%LOCALAPPDATA%\ImView\imview_shell.dll`, and disabling it removes the file.
 
 The linker cannot replace a running executable, so stop any running instance
 before rebuilding.
 
 `tests/tests.cpp` covers the logic that needs no window: the UTF-8 helpers, the
-EXIF reader and the image decoder. Run it with `ctest` in the build directory.
+EXIF reader, media-path classification and the image decoder. Run it with
+`ctest` in the build directory.
+
 Keep new parsing or format logic in a helper file so it stays testable instead of
 hiding it in `src/app.cpp`. UI behaviour is still verified by building, running
 and inspecting the window; `doc/notes/testing-notes.md` (local only) records the
@@ -61,9 +70,20 @@ techniques.
 
 ## Dependency rules
 
-- `3rd/EUI-NEO` is a git submodule pinned to one commit. Never edit files under
-  `3rd/`; bump the submodule commit deliberately instead. If a framework
-  behaviour must change, adapt the application, or contribute upstream.
+- `3rd/EUI-NEO` and `3rd/ffmpeg` are git submodules pinned to one commit.
+  Never edit files under `3rd/`; bump the submodule commit deliberately
+  instead. If a framework behaviour must change, adapt the application, or
+  contribute upstream.
+- Video support is guarded by `IMVIEW_ENABLE_VIDEO` (default ON). OFF replaces
+  `src/video_player.cpp` with the no-op `src/video_player_stub.cpp`, disables
+  video extensions in `media_paths.cpp`, and must not link FFmpeg/miniaudio.
+- FFmpeg is not built by CMake. `tools/build_ffmpeg.cmd` / `.ps1` load MSVC and
+  run `tools/build_ffmpeg.sh`, which configures the submodule and writes static
+  libraries to `build/ffmpeg-build`. CMake links that directory through
+  `IMVIEW_FFMPEG_ROOT`; keep the configure list minimal and in the helper. It
+  includes the container and sidecar text-subtitle demuxers; the helper rebuilds
+  `allformats.o` after configure and writes `.imview-external-subtitles` so an
+  older build directory is reconfigured once.
 - Third-party helpers (`stb_image`) are included from the EUI-NEO tree. stb_image
   is compiled in `src/stb_wrap.cpp` with `STB_IMAGE_STATIC` so its symbols stay
   private; keep that isolation.
@@ -78,8 +98,9 @@ techniques.
 - State is a single anonymous-namespace struct reached through `state()`.
   Mutate it from UI/worker callbacks and call `app::requestUpdate()`.
 - Rendering is a pure function of state: `compose()` may be called every frame,
-  so it must not have side effects other than cache refreshes (the pan clamp and
-  the cached cell rectangles are the only exceptions).
+  so it must not have side effects other than cache refreshes (the pan clamp,
+  the cached cell rectangles, the sync-availability enforcement and the
+  end-of-playback group pause are the only exceptions).
 - Strings are UTF-8. Any `std::filesystem` call that takes a path built from a
   UTF-8 `std::string` must use `u8path`, and display text must use `u8string`.
 - Reuse the existing helpers (`composeToggleChip`, `composeWindowButton`,
@@ -103,7 +124,13 @@ techniques.
   new colour literals.
 - The window is borderless. Anything drawn in the 36 px title bar that must be
   clickable has to be accounted for in the left/right control widths passed to
-  `imview::frame::installBorderlessWindow`.
+  `imview::frame::installBorderlessWindow` (80/270/302 on the left, 300 on the
+  right). With a video present the window uses a client-side drag so decoded
+  frames keep composing; image-only windows use the native move loop.
+- Explorer integration is strictly opt-in from the About dialog. Do not register
+  file associations or the context-menu helper at startup. The helper DLL is
+  embedded in `imview.exe`; keep its build target as an embedded resource rather
+  than a shipped sidecar.
 - Four-space indentation, 100-column soft limit, braces on the same line.
 
 ## Documentation rules
@@ -135,9 +162,9 @@ same commit. When a change only explains *why*, put that in `doc/notes/`.
 ## Commit hygiene
 
 - `.gitignore` keeps out `build/`, `scripts/`, `datas/` and `doc/notes/`. Do
-  not add files from those paths. `3rd/EUI-NEO` is tracked as a submodule
-  gitlink only; never add its contents (a plain file under `3rd/`, such as the
-  notices, is tracked normally).
+  not add files from those paths. Submodules under `3rd/` are tracked as
+  gitlinks only; never add their contents (a plain file under `3rd/`, such as
+  the notices, is tracked normally).
 - Temporary self-test hooks (`std::getenv("IMVIEW_SELFTEST_*")`) and debug dumps
   must be removed before committing; search for `SELFTEST` and for absolute
   paths that point at the author's machine.

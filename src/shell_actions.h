@@ -24,6 +24,27 @@ bool openWith(const std::string& path);
 // Shows the shell file properties dialog.
 bool showProperties(const std::string& path);
 
+// On-demand Explorer integration. Nothing is registered at startup; the About
+// dialog exposes these switches. Image/video registration writes HKCU only as a
+// Default Apps candidate and never changes the user's explicit default choice.
+// It deliberately does not create an Open With entry. The context-menu switch
+// registers the small imview_shell.dll handler that appears for a single folder,
+// two to four images, two to four videos, or one to two folders.
+struct IntegrationStatus {
+    bool images = false;
+    bool videos = false;
+    bool contextMenu = false;
+    bool contextMenuAvailable = false;
+};
+
+bool registerImageAssociations();
+bool unregisterImageAssociations();
+bool registerVideoAssociations();
+bool unregisterVideoAssociations();
+bool registerContextMenu();
+void unregisterContextMenu();
+IntegrationStatus integrationStatus();
+
 // Directory that holds the running executable.
 std::string executableDirectory();
 
