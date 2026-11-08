@@ -103,9 +103,11 @@ The full list is in [doc/shortcuts.md](doc/shortcuts.md).
 ## Build
 
 Requires Windows 10/11, Visual Studio with the C++ workload, CMake 3.14+, and
-GNU make, nasm and a POSIX shell for the FFmpeg configure step (Git for
-Windows or MSYS2; `3rd/tools` can provide make and nasm). EUI-NEO and FFmpeg
-are submodules, so clone recursively:
+a POSIX shell for the FFmpeg configure step (Git for Windows or MSYS2). The
+FFmpeg helper downloads pinned GNU make 4.4.1 and NASM 3.02 x64 binaries into
+the Git-ignored `3rd/tools`; `tools\download_ffmpeg_tools.cmd` fetches them
+without starting a build. EUI-NEO and FFmpeg are submodules, so clone
+recursively:
 
 ```sh
 git clone --recursive https://github.com/zixiangro/imview.git
@@ -117,6 +119,9 @@ Build the minimal static FFmpeg once from a normal command prompt:
 ```bat
 tools\build_ffmpeg.cmd
 ```
+
+The helper downloads the pinned GNU make and NASM builds into `3rd/tools` when
+they are missing or damaged.
 
 Then build ImView:
 

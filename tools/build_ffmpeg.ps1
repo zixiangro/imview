@@ -9,6 +9,11 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $shScript = Join-Path $PSScriptRoot 'build_ffmpeg.sh'
 
+# The pinned GNU make and NASM builds live in the Git-ignored 3rd\tools.
+# The download helper verifies existing files and only uses the network when
+# one is missing or does not match its checksum.
+& (Join-Path $PSScriptRoot 'download_ffmpeg_tools.ps1')
+
 if (-not $env:VCINSTALLDIR) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (Test-Path $vswhere) {

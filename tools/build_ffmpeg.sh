@@ -3,7 +3,8 @@
 #
 # Run this from an MSVC x64 developer environment (vcvars64.bat) inside a POSIX
 # shell (MSYS2, Git Bash, or the bundled busybox sh) with GNU make and nasm on
-# PATH. The 3rd/tools folder contains Windows builds of make and nasm.
+# PATH. On Windows, build_ffmpeg.cmd downloads the pinned Windows builds into
+# 3rd/tools before running this script.
 #
 #   tools/build_ffmpeg.sh [build-dir]
 #
@@ -17,15 +18,15 @@ root_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 source_dir="$root_dir/3rd/ffmpeg"
 build_dir=${1:-"$root_dir/build/ffmpeg-build"}
 
-# The checked-in tools are Windows executables; putting them on PATH also makes
-# nasm available to the FFmpeg x86 assembly step.
+# The downloaded tools are Windows executables; putting them on PATH also
+# makes nasm available to the FFmpeg x86 assembly step.
 if [ -d "$root_dir/3rd/tools" ]; then
     PATH="$root_dir/3rd/tools:$PATH"
     export PATH
 fi
 
-# Prefer the bundled GNU make when the caller did not choose one. On Windows it
-# needs a POSIX shell through MAKESHELL; MSYS2/Git Bash provide SHELL.
+# Prefer the downloaded GNU make when the caller did not choose one. On Windows
+# it needs a POSIX shell through MAKESHELL; MSYS2/Git Bash provide SHELL.
 if [ -z "${MAKE:-}" ] && [ -x "$root_dir/3rd/tools/gnumake-4.4.1-x64.exe" ]; then
     MAKE="$root_dir/3rd/tools/gnumake-4.4.1-x64.exe"
 fi

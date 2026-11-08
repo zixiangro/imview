@@ -5,10 +5,9 @@
 - Windows 10/11 (the window layer uses Win32 APIs).
 - Visual Studio with the Desktop C++ workload (MSVC x64).
 - CMake 3.14 or newer.
-- A POSIX shell for the FFmpeg configure script: Git for Windows, MSYS2, or a
-  standalone `sh.exe` on `PATH`.
-- GNU make and nasm on `PATH` for the FFmpeg build; the local `3rd/tools`
-  folder can provide both.
+- GNU make and nasm for the FFmpeg build. `tools\build_ffmpeg.cmd` downloads
+  pinned x64 builds into the Git-ignored `3rd/tools`; run
+  `tools\download_ffmpeg_tools.cmd` to fetch them without starting a build.
 
 Bundled third-party sources (GLFW, FreeType, libpng, zlib, stb_image, ...) are
 compiled by EUI-NEO, so no system packages are needed.
@@ -41,7 +40,9 @@ tools\build_ffmpeg.cmd
 
 The script loads the MSVC x64 environment, finds a POSIX shell (Git for
 Windows, MSYS2 or a standalone busybox `sh.exe`) and writes the libraries to
-`build\ffmpeg-build`. CMake reads that directory by default; use
+`build\ffmpeg-build`. Before that it calls `tools\download_ffmpeg_tools.ps1`,
+which fetches GNU make 4.4.1 and NASM 3.02 into `3rd\tools` and verifies their
+SHA-256 hashes. CMake reads the library directory by default; use
 `-DIMVIEW_FFMPEG_ROOT=<dir>` for a different location.
 
 The configure line enables the file protocol, the common container demuxers and
@@ -134,9 +135,10 @@ src/                    application sources
 tests/                  logic tests (built as imview_tests)
 res/                    Windows version resource template
 doc/                    documentation
-tools/                  FFmpeg build helper (CMake does not run it automatically)
+tools/                  FFmpeg build and tool-download helpers (CMake does not run them)
 3rd/EUI-NEO/            build dependency, a git submodule
 3rd/ffmpeg/             FFmpeg source, a git submodule
+3rd/tools/              downloaded GNU make and NASM (ignored by Git)
 3rd/THIRD-PARTY-NOTICES licences of everything linked into the binary
 /build/ffmpeg-build/    minimal static FFmpeg output (ignored by Git)
 ```
