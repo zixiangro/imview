@@ -103,16 +103,22 @@ switches; each can be turned on or off at any time.
 
 | Option | Effect |
 |---|---|
-| Images | Adds the image extensions as a Default Apps candidate under `HKCU` |
-| Videos | Adds the video extensions as a Default Apps candidate under `HKCU` |
+| Images | Adds the image extensions as Default Apps and Open With candidates under `HKCU` |
+| Videos | Adds the video extensions as Default Apps and Open With candidates under `HKCU` |
 | Right-click menu | Extracts the embedded helper under `%LOCALAPPDATA%\ImView\ShellExt` and registers it for images, videos and folders; disabling removes it again |
 
 - The media options never write an explicit `UserChoice`; the user remains in
-  control of the default application.
+  control of the default application. They write the app-specific `ProgID`,
+  `Applications\imview.exe`, `SupportedTypes`, `OpenWithProgids` and
+  `Capabilities\FileAssociations` entries so ImView appears in both Open With
+  and the Default Apps chooser.
 - The right-click handler is registered under the image and video
   `SystemFileAssociations` keys and `Directory`, not under the all-files `*`
   key. Explorer therefore loads it only for the media and folder selections it
   handles.
+- `imview.exe --register-integration` writes both media candidates and their
+  current command paths without opening a window. It repairs entries left by a
+  moved executable or an interrupted test.
 - `imview.exe --uninstall-integration` removes the ImView registration, extracted
   helper and legacy ImView keys without opening a window or changing the user's
   explicit default apps. Windows keeps an explicit `UserChoice`, so a file type

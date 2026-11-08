@@ -55,15 +55,17 @@ cmake --build build --parallel
 The build produces a single `build/imview.exe`. The opt-in Explorer context-menu
 helper is embedded as a resource; enabling the switch extracts it under
 `%LOCALAPPDATA%\ImView\ShellExt`, and disabling it removes those files.
-`imview.exe --uninstall-integration` removes the registration and extracted
-files without opening a window.
+`imview.exe --register-integration` writes both media candidates and their
+current command paths; `imview.exe --uninstall-integration` removes the
+registration and extracted files. Both run without opening a window.
 
 The linker cannot replace a running executable, so stop any running instance
 before rebuilding.
 
 `tests/tests.cpp` covers the logic that needs no window: the UTF-8 helpers, the
-EXIF reader, media-path classification and the image decoder. Run it with
-`ctest` in the build directory.
+EXIF reader, media-path classification and the image decoder. `tests/registry_guard.cpp`
+covers the ImView-owned registry path allowlist. Run both with `ctest` in the
+build directory.
 
 Keep new parsing or format logic in a helper file so it stays testable instead of
 hiding it in `src/app.cpp`. UI behaviour is still verified by building, running

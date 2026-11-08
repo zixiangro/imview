@@ -20,6 +20,7 @@ listed in [eui-neo-gaps.md](eui-neo-gaps.md).
 | `src/window_frame.cpp` / `.h` | Borderless Win32 window: custom frame, native or video-aware drag, resize, window buttons, DPI scale, cursor, OLE file-drop target, single-instance messaging and cursor polling |
 | `src/utf8.h` | UTF-8/UTF-16 conversion, shared by the app and the shell actions |
 | `tests/tests.cpp` | Logic tests: UTF-8, EXIF, media paths, image decoding |
+| `tests/registry_guard.cpp` | Regression tests for the ImView-owned HKCU path allowlist |
 
 `src/app.cpp` holds one anonymous-namespace state object (`state()`) and a set of
 free functions that mutate it. `app::compose()` and `app::dslAppConfig()` are the
@@ -137,7 +138,7 @@ A new process enumerates windows carrying the property and asks each one to add
 the paths; the receiver checks capacity before mutating anything. If none can
 accept the batch (or no window exists), the process becomes a new window and
 opens the first media's folder in the sidebar. HKCU registration is opt-in and
-can make ImView a Default Apps candidate for images and/or videos.
+can make ImView a Default Apps and Open With candidate for images and/or videos.
 
 Diff mode is available only for two image cells; `diffPairReady()` rejects
 videos. Review mode also reviews images only: it scans pair positions, skips a
@@ -251,8 +252,9 @@ last rounded-corner gap so the custom frame reaches all four window edges.
 `imview.exe` does not touch the registry at startup. The About dialog's three
 switches call `imview::shell` functions. Image and video registration share a
 single app registration key, but each switch adds or removes only its own
-ProgID, `OpenWithProgids` and `Capabilities\FileAssociations` entries. Turning
-both off removes the app/capabilities keys as well. Every write and delete is
+ProgID, `Applications\imview.exe`/`SupportedTypes`, `OpenWithProgids` and
+`Capabilities\FileAssociations` entries. Turning both off removes the
+app/capabilities keys as well. Every write and delete is
 restricted to fixed ImView-owned HKCU paths; registration never writes an
 explicit `UserChoice` or a desktop, Start-menu, or policy key.
 
@@ -272,8 +274,10 @@ selection shapes, and launches `imview.exe --new-window <paths...>`. The app
 parses that flag before its single-instance forwarding path, so the action
 always creates a fresh window. Disabling the switch removes the registration
 and the extracted DLL (or schedules its removal at reboot when Explorer still
-has it mapped). `imview.exe --uninstall-integration` performs the same cleanup
-without opening a window and leaves the user's explicit default apps alone.
+has it mapped). `imview.exe --register-integration` writes both media
+candidates with the current executable path, without opening a window.
+`imview.exe --uninstall-integration` performs the cleanup without opening a
+window and leaves the user's explicit default apps alone.
 
 Windows 11 presents this legacy context-menu handler under *Show more options*.
 

@@ -1862,6 +1862,7 @@ void endQSwap() {
 struct LaunchRequest {
     std::vector<std::string> paths;
     bool newWindow = false;
+    bool registerIntegration = false;
     bool uninstallIntegration = false;
 };
 
@@ -1876,6 +1877,8 @@ LaunchRequest launchRequest() {
             if (value.empty()) continue;
             if (value == "--new-window") {
                 request.newWindow = true;
+            } else if (value == "--register-integration") {
+                request.registerIntegration = true;
             } else if (value == "--uninstall-integration") {
                 request.uninstallIntegration = true;
             } else {
@@ -4736,6 +4739,9 @@ const DslAppConfig& dslAppConfig() {
             // extracted helper without touching the user's explicit defaults.
             if (request.uninstallIntegration) {
                 std::exit(imview::shell::uninstallIntegration() ? 0 : 1);
+            }
+            if (request.registerIntegration) {
+                std::exit(imview::shell::registerIntegration() ? 0 : 1);
             }
             // Serialize the forward-or-create decision so two Explorer launches
             // cannot both decide that no window exists.

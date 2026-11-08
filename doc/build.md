@@ -89,7 +89,8 @@ the right-click switch is enabled the helper is extracted under
 
 `build/imview_tests.exe` covers the logic that does not need a window: the UTF-8
 helpers, the EXIF reader (JPEG and PNG, including malformed input), the image
-and video extension checks, and the image decoder. Fixtures are generated in
+and video extension checks, and the image decoder. `build/imview_registry_tests.exe`
+checks the registry path allowlist used by the Explorer integration. Fixtures are generated in
 code, so the repository holds no binary test data.
 
 ```sh
@@ -120,7 +121,7 @@ invoked as `imexif <file>` and its multi-line output replaces the built-in EXIF
 summary.
 
 Nothing is registered at startup. The About dialog offers separate switches for
-image Default Apps, video Default Apps, and the Explorer
+image Default Apps/Open With, video Default Apps/Open With, and the Explorer
 right-click handler embedded in the executable. Registration is HKCU only and does
 not change an existing default. Explorer double-clicks are forwarded to an
 existing window with free space, otherwise a new window is created.

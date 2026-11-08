@@ -26,9 +26,9 @@ bool showProperties(const std::string& path);
 
 // On-demand Explorer integration. Nothing is registered at startup; the About
 // dialog exposes these switches. Image/video registration writes HKCU only as a
-// Default Apps candidate and never changes the user's explicit default choice.
-// It deliberately does not create an Open With entry. The context-menu switch
-// registers the small imview_shell.dll handler for images, videos and folders;
+// Default Apps and Open With candidate and never changes the user's explicit
+// default choice. The context-menu switch registers the small imview_shell.dll
+// handler for images, videos and folders;
 // it appears for a single folder, two to four images, two to four videos, or one
 // to two folders. The helper is extracted under %LOCALAPPDATA%\ImView\ShellExt
 // with a content-hashed file name.
@@ -43,6 +43,7 @@ bool registerImageAssociations();
 bool unregisterImageAssociations();
 bool registerVideoAssociations();
 bool unregisterVideoAssociations();
+bool registerIntegration();
 bool registerContextMenu();
 bool unregisterContextMenu();
 bool uninstallIntegration();

@@ -29,8 +29,8 @@ opt-in Explorer helper is embedded in the executable.
   they return when only images remain. Videos keep their own controls and the
   one global volume slider stays available.
 - **Explorer integration (opt-in)** — nothing is registered at startup. The
-  About dialog has separate switches for images and videos as Default Apps
-  candidates, plus a right-click `Open with ImView in new window`
+  About dialog has separate switches for images and videos as Default Apps and
+  Open With candidates, plus a right-click `Open with ImView in new window`
   entry for a single folder, two to four images, two to four videos, or one to
   two folders. The right-click entry always starts a new window. Image/video
   registration is HKCU only and never changes an explicit default.
@@ -145,15 +145,18 @@ build\imview.exe
 build\imview.exe D:\images
 build\imview.exe D:\left D:\right
 build\imview.exe D:\clips\sample.mp4
+build\imview.exe --register-integration
 build\imview.exe --uninstall-integration
 ```
 
 Arguments may be image files, video files or folders; folders open in the
 sidebar and media joins the grid. A new window started with a file opens that
-file's folder in the sidebar. `--uninstall-integration` removes ImView's
-Explorer integration and extracted helper without opening a window; it does not
-change an explicit default app. If ImView was the chosen default for a file
-type, Windows keeps that choice, so select another app in Settings afterwards.
+file's folder in the sidebar. `--register-integration` adds the image and video
+Default Apps candidates without opening a window, which also repairs stale
+registered command paths. `--uninstall-integration` removes ImView's Explorer
+integration and extracted helper without opening a window; it does not change an
+explicit default app. If ImView was the chosen default for a file type, Windows
+keeps that choice, so select another app in Settings afterwards.
 
 ## Documentation
 

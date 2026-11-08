@@ -150,6 +150,21 @@ if(IMVIEW_BUILD_TESTS)
         IMVIEW_ENABLE_VIDEO=${IMVIEW_ENABLE_VIDEO_VALUE}
     )
     add_test(NAME logic COMMAND imview_tests)
+
+    if(WIN32)
+        add_executable(imview_registry_tests
+            tests/registry_guard.cpp
+            src/media_paths.cpp
+        )
+        target_include_directories(imview_registry_tests PRIVATE src 3rd/EUI-NEO)
+        target_compile_definitions(imview_registry_tests PRIVATE
+            NOMINMAX WIN32_LEAN_AND_MEAN
+            IMVIEW_ENABLE_VIDEO=${IMVIEW_ENABLE_VIDEO_VALUE}
+        )
+        target_link_libraries(imview_registry_tests PRIVATE
+            advapi32 shell32 ole32 oleaut32 uuid user32)
+        add_test(NAME registry_guard COMMAND imview_registry_tests)
+    endif()
 endif()
 
 # `cmake --install` produces a release-ready folder: the binary plus the licence

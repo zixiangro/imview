@@ -46,6 +46,8 @@ namespace {
 constexpr wchar_t kRegisteredApplicationsKey[] = L"Software\\RegisteredApplications";
 constexpr wchar_t kApplicationsKey[] =
     L"Software\\Classes\\Applications\\imview.exe";
+constexpr wchar_t kImageProgIdKey[] = L"Software\\Classes\\ImView.Image";
+constexpr wchar_t kVideoProgIdKey[] = L"Software\\Classes\\ImView.Video";
 constexpr wchar_t kLegacyContextMenuKey[] =
     L"Software\\Classes\\*\\shellex\\ContextMenuHandlers\\ImView";
 constexpr wchar_t kImageContextMenuKey[] =
@@ -68,6 +70,12 @@ bool isRegisteredApplicationsPath(const std::wstring& path) {
 
 bool isImViewValueName(const wchar_t* valueName) {
     return valueName != nullptr && _wcsicmp(valueName, L"ImView") == 0;
+}
+
+bool isImViewProgId(const wchar_t* valueName) {
+    return valueName != nullptr &&
+           (_wcsicmp(valueName, L"ImView.Image") == 0 ||
+            _wcsicmp(valueName, L"ImView.Video") == 0);
 }
 
 bool isMediaExtension(const std::wstring& extension) {
@@ -115,7 +123,8 @@ bool isSafeRegistryWritePath(HKEY root, const std::wstring& path) {
     if (root != HKEY_CURRENT_USER || hasUnsafeRegistryPathText(path)) return false;
     static const wchar_t* const prefixes[] = {
         L"Software\\ImView",
-        L"Software\\Classes\\ImView.",
+        kImageProgIdKey,
+        kVideoProgIdKey,
         kApplicationsKey,
         L"Software\\Classes\\CLSID\\{A7F1E2C4-5B3D-4E6A-9C2F-1D8B7A6E5F40}",
         kImageContextMenuKey,
@@ -126,14 +135,15 @@ bool isSafeRegistryWritePath(HKEY root, const std::wstring& path) {
     for (const wchar_t* prefix : prefixes) {
         if (hasRegistryPathPrefix(path, prefix)) return true;
     }
-    return isRegisteredApplicationsPath(path);
+    return isRegisteredApplicationsPath(path) || isMediaExtensionOpenWithPath(path);
 }
 
 bool isSafeRegistryDeleteKeyPath(HKEY root, const std::wstring& path) {
     if (!isSafeRegistryWritePath(root, path)) return false;
-    // Never delete the shared RegisteredApplications key itself; only the
-    // ImView value inside it may be removed.
-    return !isRegisteredApplicationsPath(path);
+    // Never delete the shared RegisteredApplications key or an extension's
+    // OpenWithProgids key itself; only the ImView value inside may be removed.
+    return !isRegisteredApplicationsPath(path) &&
+           !isMediaExtensionOpenWithPath(path);
 }
 
 bool isSafeRegistryDeleteValuePath(HKEY root, const std::wstring& path) {
@@ -145,6 +155,9 @@ bool setRegistryString(HKEY root, const std::wstring& subkey,
                        const wchar_t* valueName, const std::wstring& value) {
     if (!isSafeRegistryWritePath(root, subkey)) return false;
     if (isRegisteredApplicationsPath(subkey) && !isImViewValueName(valueName)) {
+        return false;
+    }
+    if (isMediaExtensionOpenWithPath(subkey) && !isImViewProgId(valueName)) {
         return false;
     }
     HKEY key = nullptr;
@@ -175,6 +188,9 @@ bool deleteRegistryValue(HKEY root, const std::wstring& subkey,
         return false;
     }
     if (isRegisteredApplicationsPath(subkey) && !isImViewValueName(valueName)) {
+        return false;
+    }
+    if (isMediaExtensionOpenWithPath(subkey) && !isImViewProgId(valueName)) {
         return false;
     }
     HKEY key = nullptr;
@@ -735,10 +751,12 @@ bool syncMediaAssociations(bool images, bool videos) {
     const std::wstring videoProgId = L"ImView.Video";
     const std::wstring capabilities = L"Software\\ImView\\Capabilities";
     const std::wstring fileAssociations = capabilities + L"\\FileAssociations";
+    const std::wstring supportedTypes =
+        std::wstring(kApplicationsKey) + L"\\SupportedTypes";
 
     bool ok = true;
-    // Older versions also created an Applications\imview.exe Open With entry.
-    // The default-app registration uses ProgIDs and capabilities instead.
+    // Rebuild the Applications entry from scratch so a disabled type leaves no
+    // stale Open With or SupportedTypes values behind.
     ok = deleteRegistryKey(HKEY_CURRENT_USER, kApplicationsKey) && ok;
 
     if (images || videos) {
@@ -752,6 +770,16 @@ bool syncMediaAssociations(bool images, bool videos) {
         ok = setRegistryString(HKEY_CURRENT_USER,
                                kRegisteredApplicationsKey,
                                L"ImView", capabilities) && ok;
+        ok = setRegistryString(HKEY_CURRENT_USER, kApplicationsKey,
+                               L"FriendlyAppName", L"ImView") && ok;
+        ok = setRegistryString(HKEY_CURRENT_USER,
+                               std::wstring(kApplicationsKey) + L"\\DefaultIcon",
+                               nullptr, quoted + L",0") && ok;
+        ok = setRegistryString(
+                 HKEY_CURRENT_USER,
+                 std::wstring(kApplicationsKey) +
+                     L"\\shell\\open\\command",
+                 nullptr, command) && ok;
     } else {
         ok = deleteRegistryKey(HKEY_CURRENT_USER, capabilities) && ok;
         ok = deleteRegistryValue(HKEY_CURRENT_USER,
@@ -785,17 +813,20 @@ bool syncMediaAssociations(bool images, bool videos) {
                                     bool enabled, const std::wstring& progId) {
         for (const auto& extension : extensions) {
             const std::wstring wideExtension = imview::utf8::widen(extension);
-            // Legacy Open With entries are no longer part of the model. Remove
-            // them so an upgrade leaves only the default-app registration.
-            ok = deleteRegistryValue(
-                     HKEY_CURRENT_USER,
-                     L"Software\\Classes\\" + wideExtension +
-                         L"\\OpenWithProgids",
-                     progId.c_str()) && ok;
+            const std::wstring openWithKey =
+                L"Software\\Classes\\" + wideExtension + L"\\OpenWithProgids";
             if (enabled) {
+                ok = setRegistryString(HKEY_CURRENT_USER, openWithKey,
+                                       progId.c_str(), L"") && ok;
+                ok = setRegistryString(HKEY_CURRENT_USER, supportedTypes,
+                                       wideExtension.c_str(), L"") && ok;
                 ok = setRegistryString(HKEY_CURRENT_USER, fileAssociations,
                                        wideExtension.c_str(), progId) && ok;
             } else {
+                ok = deleteRegistryValue(HKEY_CURRENT_USER, openWithKey,
+                                         progId.c_str()) && ok;
+                ok = deleteRegistryValue(HKEY_CURRENT_USER, supportedTypes,
+                                         wideExtension.c_str()) && ok;
                 ok = deleteRegistryValue(HKEY_CURRENT_USER, fileAssociations,
                                          wideExtension.c_str()) && ok;
             }
@@ -842,6 +873,14 @@ bool registerVideoAssociations() {
 bool unregisterVideoAssociations() {
 #if defined(_WIN32) && IMVIEW_ENABLE_VIDEO
     return syncMediaAssociations(integrationStatus().images, false);
+#else
+    return false;
+#endif
+}
+
+bool registerIntegration() {
+#if defined(_WIN32)
+    return syncMediaAssociations(true, IMVIEW_ENABLE_VIDEO != 0);
 #else
     return false;
 #endif
