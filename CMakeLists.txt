@@ -92,9 +92,9 @@ eui_neo_configure_app(imview)
 
 # Explorer sees the complete multi-selection only inside a COM context-menu
 # handler, so this small DLL implements IShellExtInit/IContextMenu. The DLL is
-# embedded into imview.exe as RCDATA; the About switch extracts it to
-# %LOCALAPPDATA%\ImView and removes it again when switched off. It only launches
-# imview.exe with --new-window.
+# embedded into imview.exe as RCDATA; the About switch extracts it under
+# %LOCALAPPDATA%\ImView\ShellExt and removes it again when switched off. It only
+# launches imview.exe with --new-window.
 add_library(imview_shell SHARED
     src/shell_menu.cpp
     src/media_paths.cpp

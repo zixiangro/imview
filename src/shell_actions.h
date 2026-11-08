@@ -28,8 +28,10 @@ bool showProperties(const std::string& path);
 // dialog exposes these switches. Image/video registration writes HKCU only as a
 // Default Apps candidate and never changes the user's explicit default choice.
 // It deliberately does not create an Open With entry. The context-menu switch
-// registers the small imview_shell.dll handler that appears for a single folder,
-// two to four images, two to four videos, or one to two folders.
+// registers the small imview_shell.dll handler for images, videos and folders;
+// it appears for a single folder, two to four images, two to four videos, or one
+// to two folders. The helper is extracted under %LOCALAPPDATA%\ImView\ShellExt
+// with a content-hashed file name.
 struct IntegrationStatus {
     bool images = false;
     bool videos = false;
@@ -42,7 +44,8 @@ bool unregisterImageAssociations();
 bool registerVideoAssociations();
 bool unregisterVideoAssociations();
 bool registerContextMenu();
-void unregisterContextMenu();
+bool unregisterContextMenu();
+bool uninstallIntegration();
 IntegrationStatus integrationStatus();
 
 // Directory that holds the running executable.

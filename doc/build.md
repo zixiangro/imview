@@ -82,8 +82,8 @@ cmake --build build --parallel
 The build writes a single `build/imview.exe`; the opt-in Explorer context-menu
 handler is compiled into it as an embedded resource. No `assets` folder is
 produced or needed. An incremental rebuild only needs the second command. When
-the right-click switch is enabled the helper is extracted to
-`%LOCALAPPDATA%\ImView\imview_shell.dll`; disabling it removes that file.
+the right-click switch is enabled the helper is extracted under
+`%LOCALAPPDATA%\ImView\ShellExt`; disabling it removes those files.
 
 ## Tests
 

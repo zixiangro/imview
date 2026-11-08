@@ -130,8 +130,8 @@ then not required and all video-related UI, formats, sync mode and integration
 cases are disabled.
 
 The result is a single `build/imview.exe`; the opt-in Explorer context-menu
-helper is embedded and written to `%LOCALAPPDATA%` only when enabled. No
-`assets` folder is used. The current MSVC build uses
+helper is embedded and written under `%LOCALAPPDATA%\ImView\ShellExt` only when
+enabled. No `assets` folder is used. The current MSVC build uses
 the dynamic C++ runtime, so the target machine needs the Microsoft Visual C++
 2015–2022 x64 runtime. See [doc/release.md](doc/release.md) for packaging.
 
@@ -145,11 +145,15 @@ build\imview.exe
 build\imview.exe D:\images
 build\imview.exe D:\left D:\right
 build\imview.exe D:\clips\sample.mp4
+build\imview.exe --uninstall-integration
 ```
 
 Arguments may be image files, video files or folders; folders open in the
 sidebar and media joins the grid. A new window started with a file opens that
-file's folder in the sidebar.
+file's folder in the sidebar. `--uninstall-integration` removes ImView's
+Explorer integration and extracted helper without opening a window; it does not
+change an explicit default app. If ImView was the chosen default for a file
+type, Windows keeps that choice, so select another app in Settings afterwards.
 
 ## Documentation
 

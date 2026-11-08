@@ -53,8 +53,10 @@ cmake --build build --parallel
 ```
 
 The build produces a single `build/imview.exe`. The opt-in Explorer context-menu
-helper is embedded as a resource; enabling the switch extracts it to
-`%LOCALAPPDATA%\ImView\imview_shell.dll`, and disabling it removes the file.
+helper is embedded as a resource; enabling the switch extracts it under
+`%LOCALAPPDATA%\ImView\ShellExt`, and disabling it removes those files.
+`imview.exe --uninstall-integration` removes the registration and extracted
+files without opening a window.
 
 The linker cannot replace a running executable, so stop any running instance
 before rebuilding.
@@ -130,7 +132,9 @@ techniques.
 - Explorer integration is strictly opt-in from the About dialog. Do not register
   file associations or the context-menu helper at startup. The helper DLL is
   embedded in `imview.exe`; keep its build target as an embedded resource rather
-  than a shipped sidecar.
+  than a shipped sidecar. Registry writes and deletes must stay behind the
+  ImView-owned HKCU allowlist in `shell_actions.cpp`; the context-menu handler is
+  scoped to image, video and directory classes, never the all-files `*` class.
 - Four-space indentation, 100-column soft limit, braces on the same line.
 
 ## Documentation rules

@@ -105,10 +105,18 @@ switches; each can be turned on or off at any time.
 |---|---|
 | Images | Adds the image extensions as a Default Apps candidate under `HKCU` |
 | Videos | Adds the video extensions as a Default Apps candidate under `HKCU` |
-| Right-click menu | Extracts the embedded helper to `%LOCALAPPDATA%\ImView\imview_shell.dll` and registers it; disabling removes it again |
+| Right-click menu | Extracts the embedded helper under `%LOCALAPPDATA%\ImView\ShellExt` and registers it for images, videos and folders; disabling removes it again |
 
 - The media options never write an explicit `UserChoice`; the user remains in
   control of the default application.
+- The right-click handler is registered under the image and video
+  `SystemFileAssociations` keys and `Directory`, not under the all-files `*`
+  key. Explorer therefore loads it only for the media and folder selections it
+  handles.
+- `imview.exe --uninstall-integration` removes the ImView registration, extracted
+  helper and legacy ImView keys without opening a window or changing the user's
+  explicit default apps. Windows keeps an explicit `UserChoice`, so a file type
+  that was set to ImView must be pointed at another app in Settings afterwards.
 - The right-click entry `Open with ImView in new window` appears only for a
   selection of one folder, two to four images, two to four videos, or one to
   two folders. Mixed selections and larger selections do not show it.

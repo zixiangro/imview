@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -1861,6 +1862,7 @@ void endQSwap() {
 struct LaunchRequest {
     std::vector<std::string> paths;
     bool newWindow = false;
+    bool uninstallIntegration = false;
 };
 
 LaunchRequest launchRequest() {
@@ -1874,6 +1876,8 @@ LaunchRequest launchRequest() {
             if (value.empty()) continue;
             if (value == "--new-window") {
                 request.newWindow = true;
+            } else if (value == "--uninstall-integration") {
+                request.uninstallIntegration = true;
             } else {
                 request.paths.push_back(std::move(value));
             }
@@ -4728,6 +4732,11 @@ const DslAppConfig& dslAppConfig() {
         .fps(120.0)
         .onStart([] {
             const LaunchRequest request = launchRequest();
+            // Maintenance mode: remove every ImView integration key and the
+            // extracted helper without touching the user's explicit defaults.
+            if (request.uninstallIntegration) {
+                std::exit(imview::shell::uninstallIntegration() ? 0 : 1);
+            }
             // Serialize the forward-or-create decision so two Explorer launches
             // cannot both decide that no window exists.
             imview::frame::lockInstanceStartup();

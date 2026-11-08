@@ -251,30 +251,38 @@ last rounded-corner gap so the custom frame reaches all four window edges.
 `imview.exe` does not touch the registry at startup. The About dialog's three
 switches call `imview::shell` functions. Image and video registration share a
 single app registration key, but each switch adds or removes only its own
-ProgID, `SupportedTypes`, `OpenWithProgids` and `Capabilities\FileAssociations`
-entries. Turning both off removes the app/capabilities keys as well.
+ProgID, `OpenWithProgids` and `Capabilities\FileAssociations` entries. Turning
+both off removes the app/capabilities keys as well. Every write and delete is
+restricted to fixed ImView-owned HKCU paths; registration never writes an
+explicit `UserChoice` or a desktop, Start-menu, or policy key.
 
 The right-click switch extracts the embedded DLL to
-`%LOCALAPPDATA%\ImView\imview_shell.dll`, registers it under
-`HKCU\Software\Classes\CLSID\{...}\InprocServer32`, stores the current exe
-path under `HKCU\Software\ImView\ContextMenu\ExePath`, and installs the
-handler under `*\shellex\ContextMenuHandlers\ImView` and
-`Directory\shellex\ContextMenuHandlers\ImView`. The DLL receives the complete
-selection through `IShellExtInit`, adds a single `IContextMenu` entry only for
-the supported selection shapes, and launches
-`imview.exe --new-window <paths...>`. The app parses that flag before its
-single-instance forwarding path, so the action always creates a fresh window.
-Disabling the switch removes the registration and the extracted DLL (or
-schedules its removal at reboot when Explorer still has it mapped).
+`%LOCALAPPDATA%\ImView\ShellExt\imview_shell_<content-hash>.dll`, registers it
+under `HKCU\Software\Classes\CLSID\{...}\InprocServer32`, stores the current
+exe path under `HKCU\Software\ImView\ContextMenu\ExePath`, and installs the
+handler under `SystemFileAssociations\image\shellex\ContextMenuHandlers\ImView`,
+`SystemFileAssociations\video\shellex\ContextMenuHandlers\ImView`, and
+`Directory\shellex\ContextMenuHandlers\ImView`. Registration removes the
+all-files handler key so Explorer loads the DLL only for images, videos and
+folders. The content hash in the file name makes every embedded build a
+distinct DLL path; an existing file is reused only when its size and FNV-1a
+hash match the resource. The DLL receives the complete selection through
+`IShellExtInit`, adds a single `IContextMenu` entry only for the supported
+selection shapes, and launches `imview.exe --new-window <paths...>`. The app
+parses that flag before its single-instance forwarding path, so the action
+always creates a fresh window. Disabling the switch removes the registration
+and the extracted DLL (or schedules its removal at reboot when Explorer still
+has it mapped). `imview.exe --uninstall-integration` performs the same cleanup
+without opening a window and leaves the user's explicit default apps alone.
 
 Windows 11 presents this legacy context-menu handler under *Show more options*.
 
 ## Packages and files
 
 At runtime the application reads no assets. The embedded `imview_shell.dll` is
-written to `%LOCALAPPDATA%` and loaded by Explorer only after the user enables
-the right-click switch. `cmake --install` places the single executable and the
-licence texts in the release folder.
+written under `%LOCALAPPDATA%\ImView\ShellExt` and loaded by Explorer only after
+the user enables the right-click switch. `cmake --install` places the single
+executable and the licence texts in the release folder.
 
 
 ## Dependencies

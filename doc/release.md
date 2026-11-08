@@ -14,8 +14,9 @@ stable release and will be tagged; preview builds are not tagged.
 
 ImView is a single `imview.exe`. The opt-in Explorer helper is embedded in the
 executable. Nothing else is read from disk at startup; enabling the right-click
-switch extracts `%LOCALAPPDATA%\ImView\imview_shell.dll` and disabling it
-removes the file.
+switch extracts the helper under `%LOCALAPPDATA%\ImView\ShellExt` and disabling
+it removes those files. `imview.exe --uninstall-integration` removes the
+registration and extracted files without opening a window.
 
 | Item | Ships? | Why |
 |---|---|---|

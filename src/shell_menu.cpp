@@ -29,6 +29,19 @@
 
 namespace {
 
+// A shell extension runs inside Explorer. No C++ exception may cross a COM
+// method boundary, because an uncaught exception would take Explorer down with
+// it. Keep the guard at the entry points where allocations and file-system
+// work happen.
+template <typename Callback>
+HRESULT comGuard(Callback&& callback) noexcept {
+    try {
+        return callback();
+    } catch (...) {
+        return E_FAIL;
+    }
+}
+
 std::atomic<long> gObjectCount{0};
 
 enum class SelectionKind {
@@ -193,50 +206,61 @@ public:
     // IShellExtInit
     HRESULT STDMETHODCALLTYPE Initialize(PCIDLIST_ABSOLUTE, IDataObject* dataObject,
                                          HKEY) override {
-        paths_ = selectionPaths(dataObject);
-        kind_ = classify(paths_);
-        return S_OK;
+        return comGuard([&]() -> HRESULT {
+            paths_ = selectionPaths(dataObject);
+            kind_ = classify(paths_);
+            return S_OK;
+        });
     }
 
     // IContextMenu
     HRESULT STDMETHODCALLTYPE QueryContextMenu(HMENU menu, UINT indexMenu,
                                                UINT idCmdFirst, UINT,
                                                UINT flags) override {
-        if (kind_ == SelectionKind::None || (flags & CMF_DEFAULTONLY) != 0) {
-            return S_OK;
-        }
-        InsertMenuW(menu, indexMenu, MF_STRING | MF_BYPOSITION, idCmdFirst,
-                    L"Open with ImView in new window");
-        return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 1);
+        return comGuard([&]() -> HRESULT {
+            if (kind_ == SelectionKind::None ||
+                (flags & CMF_DEFAULTONLY) != 0) {
+                return S_OK;
+            }
+            InsertMenuW(menu, indexMenu, MF_STRING | MF_BYPOSITION, idCmdFirst,
+                        L"Open with ImView in new window");
+            return MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_NULL, 1);
+        });
     }
 
     HRESULT STDMETHODCALLTYPE InvokeCommand(CMINVOKECOMMANDINFO* info) override {
-        if (info == nullptr) return E_INVALIDARG;
-        if (!IS_INTRESOURCE(info->lpVerb) || LOWORD(info->lpVerb) != 0 ||
-            paths_.empty() || kind_ == SelectionKind::None) {
-            return E_INVALIDARG;
-        }
-        return launchNewWindow(paths_) ? S_OK : E_FAIL;
+        return comGuard([&]() -> HRESULT {
+            if (info == nullptr) return E_INVALIDARG;
+            if (!IS_INTRESOURCE(info->lpVerb) || LOWORD(info->lpVerb) != 0 ||
+                paths_.empty() || kind_ == SelectionKind::None) {
+                return E_INVALIDARG;
+            }
+            return launchNewWindow(paths_) ? S_OK : E_FAIL;
+        });
     }
 
     HRESULT STDMETHODCALLTYPE GetCommandString(UINT_PTR idCmd, UINT flags,
                                                UINT*, LPSTR name,
                                                UINT nameLength) override {
-        if (idCmd != 0) return E_INVALIDARG;
-        const wchar_t* text = (flags & GCS_HELPTEXT) != 0
-            ? L"Open the selection in a new ImView window"
-            : L"ImView.OpenInNewWindow";
-        if ((flags & GCS_UNICODE) != 0) {
-            if (name == nullptr || nameLength < (wcslen(text) + 1) * sizeof(wchar_t)) {
-                return E_POINTER;
+        return comGuard([&]() -> HRESULT {
+            if (idCmd != 0) return E_INVALIDARG;
+            const wchar_t* text = (flags & GCS_HELPTEXT) != 0
+                ? L"Open the selection in a new ImView window"
+                : L"ImView.OpenInNewWindow";
+            if ((flags & GCS_UNICODE) != 0) {
+                if (name == nullptr ||
+                    nameLength < (wcslen(text) + 1) * sizeof(wchar_t)) {
+                    return E_POINTER;
+                }
+                wcscpy_s(reinterpret_cast<wchar_t*>(name),
+                         nameLength / sizeof(wchar_t), text);
+                return S_OK;
             }
-            wcscpy_s(reinterpret_cast<wchar_t*>(name), nameLength / sizeof(wchar_t),
-                     text);
+            if (name == nullptr || nameLength == 0) return E_POINTER;
+            WideCharToMultiByte(CP_ACP, 0, text, -1, name, nameLength, nullptr,
+                                nullptr);
             return S_OK;
-        }
-        if (name == nullptr || nameLength == 0) return E_POINTER;
-        WideCharToMultiByte(CP_ACP, 0, text, -1, name, nameLength, nullptr, nullptr);
-        return S_OK;
+        });
     }
 
 private:
@@ -292,18 +316,27 @@ private:
 } // namespace
 
 STDAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void** object) {
-    if (object == nullptr) return E_POINTER;
-    *object = nullptr;
-    if (!IsEqualCLSID(clsid, kImViewContextMenuClsid)) {
-        return CLASS_E_CLASSNOTAVAILABLE;
+    try {
+        if (object == nullptr) return E_POINTER;
+        *object = nullptr;
+        if (!IsEqualCLSID(clsid, kImViewContextMenuClsid)) {
+            return CLASS_E_CLASSNOTAVAILABLE;
+        }
+        auto* factory = new (std::nothrow) ClassFactory();
+        if (factory == nullptr) return E_OUTOFMEMORY;
+        const HRESULT result = factory->QueryInterface(iid, object);
+        factory->Release();
+        return result;
+    } catch (...) {
+        if (object != nullptr) *object = nullptr;
+        return E_OUTOFMEMORY;
     }
-    auto* factory = new (std::nothrow) ClassFactory();
-    if (factory == nullptr) return E_OUTOFMEMORY;
-    const HRESULT result = factory->QueryInterface(iid, object);
-    factory->Release();
-    return result;
 }
 
 STDAPI DllCanUnloadNow(void) {
-    return gObjectCount.load() == 0 ? S_OK : S_FALSE;
+    try {
+        return gObjectCount.load() == 0 ? S_OK : S_FALSE;
+    } catch (...) {
+        return S_FALSE;
+    }
 }
