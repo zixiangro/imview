@@ -6,7 +6,7 @@ region across images numerically, browse mixed folders in a sidebar, and step
 through two folders pair by pair in review mode.
 
 Built with C++17 on [EUI-NEO](https://github.com/sudoevolve/EUI-NEO) with a
-custom borderless window in the VS Code "Dark Modern" style. Version 0.2.2 is a
+custom borderless window in the VS Code "Dark Modern" style. Version 0.2.3 is a
 preview; the application is a single `imview.exe` with no runtime assets. The
 opt-in Explorer helper is embedded in the executable.
 
