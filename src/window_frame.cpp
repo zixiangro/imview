@@ -3,6 +3,10 @@
 #include "eui_neo.h"
 #include "utf8.h"
 
+#ifndef IMVIEW_ENABLE_VIDEO
+#define IMVIEW_ENABLE_VIDEO 1
+#endif
+
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
@@ -108,12 +112,13 @@ void applyMaximizedRegion(HWND hwnd, bool maximized) {
 // for zoomed windows. Maximizing is done by resizing to the monitor work area.
 bool gMaximized = false;
 bool gTitleBarDragEnabled = true;
+RECT gRestoreRect{};
+#if IMVIEW_ENABLE_VIDEO
 bool gCustomTitleBarDrag = false;
 bool gCustomDragging = false;
 // A press on a maximized window is not a drag yet; restoring is deferred until
 // the pointer moves past the system drag threshold.
 bool gCustomDragRestorePending = false;
-RECT gRestoreRect{};
 RECT gCustomDragStartRect{};
 POINT gCustomDragStartCursor{};
 // Double-click matching for the app-driven title bar (see
@@ -121,6 +126,7 @@ POINT gCustomDragStartCursor{};
 bool gTitleBarPressSeen = false;
 DWORD gLastTitleBarPressTime = 0;
 POINT gLastTitleBarPressPoint{};
+#endif
 
 // Private message: convert a system-initiated maximize into ours.
 constexpr UINT kConvertMaximizeMessage = WM_APP + 0x51;
@@ -360,6 +366,7 @@ void applyMaximized(bool maximize) {
     }
 }
 
+#if IMVIEW_ENABLE_VIDEO
 bool customTitleBarHit(HWND hwnd, LPARAM lParam) {
     if (!gTitleBarDragEnabled || !gCustomTitleBarDrag) return false;
     RECT client{};
@@ -396,9 +403,11 @@ bool titleBarDoubleClick(HWND hwnd, LPARAM lParam) {
     gLastTitleBarPressPoint = point;
     return false;
 }
+#endif
 
 LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+#if IMVIEW_ENABLE_VIDEO
         case WM_LBUTTONDOWN:
             if (customTitleBarHit(hwnd, lParam)) {
                 if (titleBarDoubleClick(hwnd, lParam)) {
@@ -436,6 +445,7 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
                 return 0;
             }
             break;
+#endif
         case WM_COPYDATA: {
             const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
             if (data != nullptr && data->dwData == kOpenPathsCopyData) {
@@ -456,6 +466,7 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
         case WM_NCHITTEST: {
             const LRESULT result =
                 CallWindowProcW(gPreviousProc, hwnd, message, wParam, lParam);
+#if IMVIEW_ENABLE_VIDEO
             if (gCustomTitleBarDrag) {
                 RECT window{};
                 if (GetWindowRect(hwnd, &window)) {
@@ -477,6 +488,11 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
                 !(gCustomTitleBarDrag && result == HTCAPTION)) {
                 return result;
             }
+#else
+            if (result != HTCLIENT) {
+                return result;
+            }
+#endif
             RECT window{};
             if (!GetWindowRect(hwnd, &window)) {
                 return result;
@@ -510,14 +526,19 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             // move loop (drag, Aero Snap). The control clusters at both ends
             // keep receiving normal client clicks. Kept active while maximized so
             // double-click still toggles.
+#if IMVIEW_ENABLE_VIDEO
             if (gCustomTitleBarDrag && result == HTCAPTION) {
                 return HTCLIENT;
             }
+#endif
             const int titleHeight = static_cast<int>(gTitleBarHeight * scale);
             const int controlsStart =
                 (window.right - window.left) - static_cast<int>(gControlsWidth * scale);
             const int leftControlsEnd = static_cast<int>(gLeftControlsWidth * scale);
-            if (gTitleBarDragEnabled && !gCustomTitleBarDrag &&
+            if (gTitleBarDragEnabled &&
+#if IMVIEW_ENABLE_VIDEO
+                !gCustomTitleBarDrag &&
+#endif
                 top < titleHeight && left > leftControlsEnd &&
                 left < controlsStart) {
                 return HTCAPTION;
@@ -594,6 +615,7 @@ LRESULT CALLBACK borderlessProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
 } // namespace
 #endif
 
+#if IMVIEW_ENABLE_VIDEO
 void setCustomTitleBarDrag(bool custom) {
     if (gCustomTitleBarDrag != custom) {
         gCustomTitleBarDrag = custom;
@@ -653,6 +675,7 @@ void endWindowMove() {
     gCustomDragRestorePending = false;
 #endif
 }
+#endif
 
 void installBorderlessWindow(float titleBarLogicalHeight,
                              float leftControlsWidth,

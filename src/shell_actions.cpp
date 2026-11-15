@@ -762,9 +762,14 @@ bool syncMediaAssociations(bool images, bool videos) {
     if (images || videos) {
         ok = setRegistryString(HKEY_CURRENT_USER, capabilities,
                                L"ApplicationName", L"ImView") && ok;
-        ok = setRegistryString(HKEY_CURRENT_USER, capabilities,
-                               L"ApplicationDescription",
-                               L"Image and video viewer") && ok;
+        ok = setRegistryString(
+                 HKEY_CURRENT_USER, capabilities, L"ApplicationDescription",
+#if IMVIEW_ENABLE_VIDEO
+                 L"Image and video viewer"
+#else
+                 L"Image viewer"
+#endif
+             ) && ok;
         ok = setRegistryString(HKEY_CURRENT_USER, capabilities,
                                L"ApplicationIcon", quoted + L",0") && ok;
         ok = setRegistryString(HKEY_CURRENT_USER,

@@ -7,8 +7,7 @@ through two folders pair by pair in review mode.
 
 Built with C++17 on [EUI-NEO](https://github.com/sudoevolve/EUI-NEO) with a
 custom borderless window in the VS Code "Dark Modern" style. Version 0.2.3 is a
-preview; the application is a single `imview.exe` with no runtime assets. The
-opt-in Explorer helper is embedded in the executable.
+preview; the application is a single `imview.exe` with no runtime assets.
 
 ## Features
 
@@ -28,12 +27,9 @@ opt-in Explorer helper is embedded in the executable.
   (zoom, pan, rotate, `Q`, diff, EXIF, histogram, local mode) are greyed out;
   they return when only images remain. Videos keep their own controls and the
   one global volume slider stays available.
-- **Explorer integration (opt-in)** — nothing is registered at startup. The
-  About dialog has separate switches for images and videos as Default Apps and
-  Open With candidates, plus a right-click `Open with ImView in new window`
-  entry for a single folder, two to four images, two to four videos, or one to
-  two folders. The right-click entry always starts a new window. Image/video
-  registration is HKCU only and never changes an explicit default.
+- **Explorer opening** — double-clicked media joins an existing window with
+  free space, otherwise a new window opens with that file's folder in the
+  sidebar. Nothing is registered at startup.
 - **Zoom and pan** — the wheel zooms every image together; left-drag pans all of
   them, right-drag pans one. Panning never reveals empty space inside a cell.
   Zoomed pixels use nearest-neighbour sampling so their values stay exact.
@@ -134,9 +130,8 @@ For an image-only binary, configure with `-DIMVIEW_ENABLE_VIDEO=OFF`; FFmpeg is
 then not required and all video-related UI, formats, sync mode and integration
 cases are disabled.
 
-The result is a single `build/imview.exe`; the opt-in Explorer context-menu
-helper is embedded and written under `%LOCALAPPDATA%\ImView\ShellExt` only when
-enabled. No `assets` folder is used. The current MSVC build uses
+The result is a single `build/imview.exe`; no `assets` folder is used. The
+current MSVC build uses
 the dynamic C++ runtime, so the target machine needs the Microsoft Visual C++
 2015–2022 x64 runtime. See [doc/release.md](doc/release.md) for packaging.
 

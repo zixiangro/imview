@@ -66,11 +66,10 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DIMVIEW_ENABLE_VIDEO=OFF
 cmake --build build --parallel
 ```
 
-With `IMVIEW_ENABLE_VIDEO=OFF`, FFmpeg and miniaudio are not linked; video
-extensions, video playback/transport, sync mode, video file associations and
-video context-menu cases are disabled. The image viewer, sidebar, review mode
-and image-only integrations are unchanged. The `video_player_stub.cpp` target
-keeps the shared UI API linkable without a decoder. Running
+With `IMVIEW_ENABLE_VIDEO=OFF`, no player source is compiled and FFmpeg and
+miniaudio are not linked; video extensions, video playback/transport, sync mode,
+video file associations and video context-menu cases are disabled. The image
+viewer, sidebar, review mode and image-only integrations are unchanged. Running
 `tools\build_ffmpeg.cmd` is not required for this build.
 
 ## Build
@@ -80,11 +79,10 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-The build writes a single `build/imview.exe`; the opt-in Explorer context-menu
-handler is compiled into it as an embedded resource. No `assets` folder is
-produced or needed. An incremental rebuild only needs the second command. When
-the right-click switch is enabled the helper is extracted under
-`%LOCALAPPDATA%\ImView\ShellExt`; disabling it removes those files.
+The build writes a single `build/imview.exe`. The legacy Explorer context-menu
+helper remains embedded for registry cleanup, but the UI no longer exposes a
+switch for it. No `assets` folder is produced or needed. An incremental rebuild
+only needs the second command.
 
 ## Tests
 
@@ -121,11 +119,12 @@ If `imexif.exe`, `imexif.bat` or `imexif.cmd` sits next to `imview.exe`, it is
 invoked as `imexif <file>` and its multi-line output replaces the built-in EXIF
 summary.
 
-Nothing is registered at startup. The About dialog offers separate switches for
-image Default Apps/Open With, video Default Apps/Open With, and the Explorer
-right-click handler embedded in the executable. Registration is HKCU only and does
-not change an existing default. Explorer double-clicks are forwarded to an
-existing window with free space, otherwise a new window is created.
+Nothing is registered at startup, and the About dialog has no integration
+switches. `imview.exe --register-integration` writes the image and video Default
+Apps/Open With candidates; registration is HKCU only and does not change an
+existing default. `imview.exe --uninstall-integration` removes the registration
+and helper files left by older builds. Explorer double-clicks are forwarded to
+an existing window with free space, otherwise a new window is created.
 
 ## Repository layout
 

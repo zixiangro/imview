@@ -33,8 +33,9 @@ least one device pixel wide instead of blurring across two.
 
 The left interactive cluster passed to the borderless frame is 80 wide normally,
 270 while the diff slider is visible and 302 while the volume group is visible.
-The right cluster is 300 wide. These areas receive client clicks instead of
-starting a native window drag.
+The right cluster is 300 wide in the video-enabled build and 274 wide in an
+image-only build, where the `S` chip is absent. These areas receive client
+clicks instead of starting a native window drag.
 
 Status text contents, joined with `·`:
 
@@ -60,11 +61,12 @@ menus temporarily disable that so their clicks are not swallowed.
 | Cell border | 1 px `#2B2B2B` |
 | Cell background | `#212121` |
 
-The `D`, `E`, `H`, `P`, `R` and `S` chips are always drawn. The image chips are
-greyed out while a video is present; image features return when only images
-remain. In a mixed grid every image-only chip and `S` are disabled. `S` (sync)
-is enabled only with more than one video and no images. The `R` chip still
-leaves an active review mode.
+The video-enabled build draws the `D`, `E`, `H`, `P`, `R` and `S` chips; the
+image-only build omits `S` and the volume group. The image chips are greyed out
+while a video is present; image features return when only images remain. In a
+mixed grid every image-only chip and `S` are disabled. `S` (sync) is enabled
+only with more than one video and no images. The `R` chip still leaves an active
+review mode.
 
 Diff mode lays out three equal cells: the two images on the first row and the
 computed diff tile centred on the second row. The tile uses the normal grid
@@ -167,11 +169,10 @@ rectangles rather than text so they stay crisp at any DPI.
 
 | Property | Value |
 |---|---|
-| Size | 540 x 470, clamped to the window with a 16 px margin |
+| Size | 540 x 280, clamped to the window with a 16 px margin |
 | Position | centred in the window |
 | Backdrop | full-window 55% black surface |
-| Contents | title, version, description, project homepage, three integration switches, licence |
-| Integration switches | `Images — Default app candidate`, `Videos — Default app candidate`, `Right-click — Open with ImView (new window)`; 14 px checkbox, whole row clickable; the right-click row extracts the embedded helper on first enable |
+| Contents | title, version, description, project homepage and licence |
 | Buttons | `Close` (secondary) and `Open project page` (primary) |
 
 ## Colours

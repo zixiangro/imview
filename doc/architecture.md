@@ -12,8 +12,7 @@ listed in [eui-neo-gaps.md](eui-neo-gaps.md).
 | `src/app.cpp` | Application state, decoding pipeline, sidebar, review mode, and all UI composition |
 | `src/stb_wrap.cpp` / `.h` | Image decoding with stb_image over a memory-mapped file |
 | `src/media_paths.cpp` / `.h` | Image/video extension classification used by the sidebar, drops, command line and file dialog |
-| `src/video_player.cpp` / `.h` | Per-video FFmpeg video/audio/subtitle decoding, NV12 frames through an EUI `ImageStream`, transport state, audio device and thumbnail previewer |
-| `src/video_player_stub.cpp` | No-op Player implementation used when `IMVIEW_ENABLE_VIDEO=OFF` |
+| `src/video_player.cpp` / `.h` | Per-video FFmpeg video/audio/subtitle decoding, NV12 frames through an EUI `ImageStream`, transport state, audio device and thumbnail previewer; compiled only when `IMVIEW_ENABLE_VIDEO=ON` |
 | `src/exif.cpp` / `.h` | EXIF reader for JPEG (APP1) and PNG (`eXIf`); walks the container with seeks, so image data is never read |
 | `src/shell_actions.cpp` / `.h` | Native pickers, URL/file opening, "show in Explorer", "open with", "properties", and the on-demand HKCU image/video/context-menu registration |
 | `src/shell_menu.cpp` + `src/shell_menu_id.h` | `imview_shell.dll` build target embedded in the exe: opt-in Explorer `IShellExtInit`/`IContextMenu` handler for folder/image/video selections; launches a new window |
@@ -137,8 +136,9 @@ Explorer opening uses `window_frame`'s instance property and `WM_COPYDATA`.
 A new process enumerates windows carrying the property and asks each one to add
 the paths; the receiver checks capacity before mutating anything. If none can
 accept the batch (or no window exists), the process becomes a new window and
-opens the first media's folder in the sidebar. HKCU registration is opt-in and
-can make ImView a Default Apps and Open With candidate for images and/or videos.
+opens the first media's folder in the sidebar. HKCU registration is available
+only through the maintenance commands and can make ImView a Default Apps and
+Open With candidate for images and/or videos.
 
 Diff mode is available only for two image cells; `diffPairReady()` rejects
 videos. Review mode also reviews images only: it scans pair positions, skips a
@@ -164,11 +164,13 @@ to `addFoldersFromDrop`.
 ## Video decoding
 
 `src/video_player.cpp` opens a local file with `avformat_open_input`, selects the
-best video, audio and text-subtitle streams and opens their decoders. Every
-video, audio and text-subtitle stream is enumerated for the `V`/`A`/`S` track
-buttons, and every embedded text subtitle decoder runs while the file plays so
-switching tracks is immediate. The video loop drains `avcodec_receive_frame` /
-feeds packets from `av_read_frame`, ignoring unrelated streams. Video frames are converted by libswscale to NV12
+best video, audio and text-subtitle streams and opens their decoders. The main
+video decoder uses FFmpeg's automatic thread count. Every video, audio and
+text-subtitle stream is enumerated for the `V`/`A`/`S` track buttons, and every
+embedded text subtitle decoder runs while the file plays so switching tracks is
+immediate. The video loop drains `avcodec_receive_frame` / feeds packets from
+`av_read_frame`, ignoring unrelated streams. Video frames are converted by
+libswscale to NV12
 (or copied directly when already NV12), copied into one of three reusable Y/UV
 buffer pairs and submitted to an `ImageStream` with the frame's colour space and
 range. EUI's native NV12 path uploads the planes and converts them on the GPU.
@@ -176,8 +178,9 @@ range. EUI's native NV12 path uploads the planes and converts them on the GPU.
 Pacing uses `best_effort_timestamp` and the stream time base; a missing timestamp
 falls back to the stream frame rate. The player pauses on decoder EOF instead of
 looping; play from that state requests a seek to zero. A seek flushes the decoder, drops frames before the target and
-resets the pacing clock. Pause stops decoding at the current frame; a seek while
-paused decodes and displays one frame at the new position. Frame stepping decodes
+resets the pacing clock. Pause stops decoding at the current frame; pausing
+before the first frame requests that frame so the cell is not left black. A seek
+while paused decodes and displays one frame at the new position. Frame stepping decodes
 the next frame forward, or seeks back and keeps the last frame before the current
 timestamp for a backward step.
 
@@ -204,7 +207,8 @@ and newly opened players copy it. Sync mode is also an app-level rule: entering
 it pauses every player, transport helpers fan out commands when it is active,
 and `enforcePlaybackRules()` keeps the default non-sync grid down to one playing
 video. The player exposes an `ended` flag so the app can stop the whole sync
-group when one file finishes.
+group when one file finishes; pressing play after every video in the group has
+finished restarts them all from zero.
 
 The seek-bar preview is a separate `Previewer` that starts lazily on the first
 hover. It has its own decoder with one thread, seeks to the requested second,
@@ -249,44 +253,31 @@ square, borderless values while maximised, and a full-window region removes the
 last rounded-corner gap so the custom frame reaches all four window edges.
 ### Explorer integration
 
-`imview.exe` does not touch the registry at startup. The About dialog's three
-switches call `imview::shell` functions. Image and video registration share a
-single app registration key, but each switch adds or removes only its own
-ProgID, `Applications\imview.exe`/`SupportedTypes`, `OpenWithProgids` and
-`Capabilities\FileAssociations` entries. Turning both off removes the
-app/capabilities keys as well. Every write and delete is
-restricted to fixed ImView-owned HKCU paths; registration never writes an
-explicit `UserChoice` or a desktop, Start-menu, or policy key.
+`imview.exe` does not touch the registry at startup, and the About dialog has no
+integration switches. The `imview::shell` registration functions remain for the
+`--register-integration` and `--uninstall-integration` maintenance commands and
+for cleaning up registrations created by older builds. Image and video
+registration share a single app registration key, but each type adds or removes
+only its own ProgID, `Applications\imview.exe`/`SupportedTypes`,
+`OpenWithProgids` and `Capabilities\FileAssociations` entries. Turning both off
+removes the app/capabilities keys as well. Every write and delete is restricted
+to fixed ImView-owned HKCU paths; registration never writes an explicit
+`UserChoice` or a desktop, Start-menu, or policy key.
 
-The right-click switch extracts the embedded DLL to
-`%LOCALAPPDATA%\ImView\ShellExt\imview_shell_<content-hash>.dll`, registers it
-under `HKCU\Software\Classes\CLSID\{...}\InprocServer32`, stores the current
-exe path under `HKCU\Software\ImView\ContextMenu\ExePath`, and installs the
-handler under `SystemFileAssociations\image\shellex\ContextMenuHandlers\ImView`,
-`SystemFileAssociations\video\shellex\ContextMenuHandlers\ImView`, and
-`Directory\shellex\ContextMenuHandlers\ImView`. Registration removes the
-all-files handler key so Explorer loads the DLL only for images, videos and
-folders. The content hash in the file name makes every embedded build a
-distinct DLL path; an existing file is reused only when its size and FNV-1a
-hash match the resource. The DLL receives the complete selection through
-`IShellExtInit`, adds a single `IContextMenu` entry only for the supported
-selection shapes, and launches `imview.exe --new-window <paths...>`. The app
-parses that flag before its single-instance forwarding path, so the action
-always creates a fresh window. Disabling the switch removes the registration
-and the extracted DLL (or schedules its removal at reboot when Explorer still
-has it mapped). `imview.exe --register-integration` writes both media
-candidates with the current executable path, without opening a window.
-`imview.exe --uninstall-integration` performs the cleanup without opening a
-window and leaves the user's explicit default apps alone.
-
-Windows 11 presents this legacy context-menu handler under *Show more options*.
+The embedded context-menu DLL remains in the executable so the maintenance code
+can identify and remove helper files extracted by older builds. The UI no longer
+registers that helper. `imview.exe --register-integration` writes both media
+candidates with the current executable path without opening a window.
+`imview.exe --uninstall-integration` removes the media registration, the
+extracted helper files and legacy ImView keys, without opening a window and
+without changing the user's explicit default apps.
 
 ## Packages and files
 
 At runtime the application reads no assets. The embedded `imview_shell.dll` is
-written under `%LOCALAPPDATA%\ImView\ShellExt` and loaded by Explorer only after
-the user enables the right-click switch. `cmake --install` places the single
-executable and the licence texts in the release folder.
+kept only so maintenance can clean up helper files from older builds.
+`cmake --install` places the single executable and the licence texts in the
+release folder.
 
 
 ## Dependencies

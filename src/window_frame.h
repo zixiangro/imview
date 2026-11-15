@@ -4,6 +4,10 @@
 #include <string>
 #include <vector>
 
+#ifndef IMVIEW_ENABLE_VIDEO
+#define IMVIEW_ENABLE_VIDEO 1
+#endif
+
 namespace imview::frame {
 
 // Borderless-window support (Windows).
@@ -43,6 +47,7 @@ void centerWindow();
 // open, dragging must be suppressed so clicks reach the UI and dismiss it.
 void setTitleBarDragEnabled(bool enabled);
 
+#if IMVIEW_ENABLE_VIDEO
 // When a video is playing, the native Windows move loop would freeze the
 // rendered frame while the decoder keeps running. Use an app-driven drag in
 // that case: the toolbar drag surface calls begin/drag/end and the UI loop keeps
@@ -51,6 +56,7 @@ void setCustomTitleBarDrag(bool custom);
 void beginWindowMove();
 void dragWindowToCursor();
 void endWindowMove();
+#endif
 
 // File drag-and-drop. EUI-NEO has no drop API, so the application installs an
 // OLE drop target on its own window and receives the phases here. Coordinates

@@ -89,7 +89,8 @@
   the group pauses instead of leaving the other videos running. The finished
   video stays on its final frame: resuming, stepping forward or seeking forward
   does not restart it from zero. Stepping backward or seeking backward from
-  that state works from the end of that video.
+  that state works from the end of that video. Once every video in the group
+  has finished, play restarts the whole group from zero.
 - Turning sync off pauses all but the active video. Outside sync mode ImView
   always keeps at most one video playing; sync is the only way to play several
   videos together.
@@ -98,37 +99,22 @@
 
 ## Explorer integration
 
-Nothing is registered at startup. The About dialog exposes three independent
-switches; each can be turned on or off at any time.
+Nothing is registered at startup, and the About dialog has no integration
+switches.
 
-| Option | Effect |
-|---|---|
-| Images | Adds the image extensions as Default Apps and Open With candidates under `HKCU` |
-| Videos | Adds the video extensions as Default Apps and Open With candidates under `HKCU` |
-| Right-click menu | Extracts the embedded helper under `%LOCALAPPDATA%\ImView\ShellExt` and registers it for images, videos and folders; disabling removes it again |
-
-- The media options never write an explicit `UserChoice`; the user remains in
-  control of the default application. They write the app-specific `ProgID`,
+- `imview.exe --register-integration` writes the image and video Default Apps
+  and Open With candidates with the current executable path, without opening a
+  window. It repairs entries left by a moved executable or an interrupted test.
+- `imview.exe --uninstall-integration` removes the ImView media registration,
+  extracted helper files from older builds and legacy ImView keys without
+  opening a window or changing the user's explicit default apps. Windows keeps
+  an explicit `UserChoice`, so a file type that was set to ImView must be
+  pointed at another app in Settings afterwards.
+- The media registration never writes an explicit `UserChoice`; the user remains
+  in control of the default application. It writes the app-specific `ProgID`,
   `Applications\imview.exe`, `SupportedTypes`, `OpenWithProgids` and
   `Capabilities\FileAssociations` entries so ImView appears in both Open With
   and the Default Apps chooser.
-- The right-click handler is registered under the image and video
-  `SystemFileAssociations` keys and `Directory`, not under the all-files `*`
-  key. Explorer therefore loads it only for the media and folder selections it
-  handles.
-- `imview.exe --register-integration` writes both media candidates and their
-  current command paths without opening a window. It repairs entries left by a
-  moved executable or an interrupted test.
-- `imview.exe --uninstall-integration` removes the ImView registration, extracted
-  helper and legacy ImView keys without opening a window or changing the user's
-  explicit default apps. Windows keeps an explicit `UserChoice`, so a file type
-  that was set to ImView must be pointed at another app in Settings afterwards.
-- The right-click entry `Open with ImView in new window` appears only for a
-  selection of one folder, two to four images, two to four videos, or one to
-  two folders. Mixed selections and larger selections do not show it.
-- The right-click action always starts a new ImView window: a single folder or
-  up to two folders open in the sidebar; two to four images or videos fill the
-  grid. Existing windows are not reused.
 - Opening a file through the normal default app / double-click forwards it to
   an existing window that has room. The window is restored and brought to the
   front; the file is added rather than replacing the grid.
@@ -136,7 +122,6 @@ switches; each can be turned on or off at any time.
   with the file and opens that file's folder in the sidebar.
 - Concurrent launches are serialized briefly so two Explorer double-clicks do
   not both decide to create a window.
-- On Windows 11 the legacy right-click entry appears under *Show more options*.
 
 ## Grid
 
@@ -348,7 +333,6 @@ one valid image pair.
 - The `ImView` menu holds `Open...`, `Open folder...`, `Toggle sidebar` and
   `About`.
 - `About` opens a centred dialog with the version, a short description, the
-  project homepage link, three Explorer integration switches, and the licence.
-  It has `Close` and `Open project page` buttons. The right-click switch is
-  disabled only if the build contains no embedded helper.
+  project homepage link and the licence. It has `Close` and `Open project page`
+  buttons.
 - The window can be resized from its edges and corners.

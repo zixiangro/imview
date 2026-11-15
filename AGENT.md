@@ -52,12 +52,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
 
-The build produces a single `build/imview.exe`. The opt-in Explorer context-menu
-helper is embedded as a resource; enabling the switch extracts it under
-`%LOCALAPPDATA%\ImView\ShellExt`, and disabling it removes those files.
-`imview.exe --register-integration` writes both media candidates and their
-current command paths; `imview.exe --uninstall-integration` removes the
-registration and extracted files. Both run without opening a window.
+The build produces a single `build/imview.exe`. The legacy Explorer context-menu
+helper remains embedded as a resource for cleanup, but the UI does not expose a
+switch for it. `imview.exe --register-integration` writes both media candidates
+and their current command paths; `imview.exe --uninstall-integration` removes
+the registration and extracted files. Both run without opening a window.
 
 The linker cannot replace a running executable, so stop any running instance
 before rebuilding.
@@ -78,9 +77,10 @@ techniques.
   Never edit files under `3rd/`; bump the submodule commit deliberately
   instead. If a framework behaviour must change, adapt the application, or
   contribute upstream.
-- Video support is guarded by `IMVIEW_ENABLE_VIDEO` (default ON). OFF replaces
-  `src/video_player.cpp` with the no-op `src/video_player_stub.cpp`, disables
-  video extensions in `media_paths.cpp`, and must not link FFmpeg/miniaudio.
+- Video support is guarded by `IMVIEW_ENABLE_VIDEO` (default ON). OFF compiles
+  no player source at all: `app.cpp` and `window_frame.cpp` preprocess out the
+  video state, transport and client-drag code, `media_paths.cpp` reports no
+  video extensions, and the build must not link FFmpeg/miniaudio.
 - FFmpeg is not built by CMake. `tools/build_ffmpeg.cmd` / `.ps1` load MSVC and
   run `tools/build_ffmpeg.sh`, which configures the submodule and writes static
   libraries to `build/ffmpeg-build`. CMake links that directory through
@@ -131,12 +131,14 @@ techniques.
   `imview::frame::installBorderlessWindow` (80/270/302 on the left, 300 on the
   right). With a video present the window uses a client-side drag so decoded
   frames keep composing; image-only windows use the native move loop.
-- Explorer integration is strictly opt-in from the About dialog. Do not register
-  file associations or the context-menu helper at startup. The helper DLL is
-  embedded in `imview.exe`; keep its build target as an embedded resource rather
-  than a shipped sidecar. Registry writes and deletes must stay behind the
-  ImView-owned HKCU allowlist in `shell_actions.cpp`; the context-menu handler is
-  scoped to image, video and directory classes, never the all-files `*` class.
+- The About dialog exposes no integration switches. Do not register file
+  associations or the context-menu helper at startup. Media candidates are
+  written only by the `--register-integration` maintenance command. The helper
+  DLL remains embedded in `imview.exe`; keep its build target as an embedded
+  resource rather than a shipped sidecar. Registry writes and deletes must stay
+  behind the ImView-owned HKCU allowlist in `shell_actions.cpp`; the
+  context-menu handler is scoped to image, video and directory classes, never
+  the all-files `*` class.
 - Four-space indentation, 100-column soft limit, braces on the same line.
 
 ## Documentation rules

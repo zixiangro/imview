@@ -27,10 +27,12 @@ int runRegistryGuardTests() {
               HKEY_CURRENT_USER,
               L"Software\\Classes\\ImView.Image\\DefaultIcon"),
           "image ProgID subkey write");
+#if IMVIEW_ENABLE_VIDEO
     check(isSafeRegistryWritePath(
               HKEY_CURRENT_USER,
               L"Software\\Classes\\ImView.Video\\shell\\open\\command"),
           "video ProgID command write");
+#endif
     check(isSafeRegistryWritePath(
               HKEY_CURRENT_USER,
               L"Software\\ImView\\Capabilities\\FileAssociations"),
@@ -47,10 +49,12 @@ int runRegistryGuardTests() {
               HKEY_CURRENT_USER,
               L"Software\\Classes\\SystemFileAssociations\\image\\shellex\\ContextMenuHandlers\\ImView"),
           "image handler write");
+#if IMVIEW_ENABLE_VIDEO
     check(isSafeRegistryWritePath(
               HKEY_CURRENT_USER,
               L"Software\\Classes\\SystemFileAssociations\\video\\shellex\\ContextMenuHandlers\\ImView"),
           "video handler write");
+#endif
     check(isSafeRegistryWritePath(
               HKEY_CURRENT_USER,
               L"Software\\Classes\\Directory\\shellex\\ContextMenuHandlers\\ImView"),
@@ -70,7 +74,9 @@ int runRegistryGuardTests() {
               L"Software\\Classes\\Applications\\imview.exe\\SupportedTypes"),
           "supported types write");
     check(isImViewProgId(L"ImView.Image"), "image ProgID value name");
+#if IMVIEW_ENABLE_VIDEO
     check(isImViewProgId(L"ImView.Video"), "video ProgID value name");
+#endif
     check(!isImViewProgId(L"Other.Image"), "foreign ProgID value name rejected");
 
     check(!isSafeRegistryWritePath(HKEY_CURRENT_USER,
@@ -112,10 +118,12 @@ int runRegistryGuardTests() {
               HKEY_CURRENT_USER,
               L"Software\\Classes\\.jpg\\OpenWithProgids"),
           "image OpenWithProgids value delete");
+#if IMVIEW_ENABLE_VIDEO
     check(isSafeRegistryDeleteValuePath(
               HKEY_CURRENT_USER,
               L"Software\\Classes\\.mp4\\OpenWithProgids"),
           "video OpenWithProgids value delete");
+#endif
     check(!isSafeRegistryDeleteValuePath(
               HKEY_CURRENT_USER,
               L"Software\\Classes\\.exe\\OpenWithProgids"),

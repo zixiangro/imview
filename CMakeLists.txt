@@ -62,8 +62,6 @@ add_executable(imview
 )
 if(IMVIEW_ENABLE_VIDEO)
     target_sources(imview PRIVATE src/video_player.cpp)
-else()
-    target_sources(imview PRIVATE src/video_player_stub.cpp)
 endif()
 target_compile_definitions(imview PRIVATE
     IMVIEW_VERSION="${PROJECT_VERSION}"

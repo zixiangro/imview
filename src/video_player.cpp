@@ -479,8 +479,15 @@ public:
         }
         codec_ = avcodec_alloc_context3(codec);
         if (codec_ == nullptr ||
-            avcodec_parameters_to_context(codec_, stream_->codecpar) < 0 ||
-            avcodec_open2(codec_, codec, nullptr) < 0) {
+            avcodec_parameters_to_context(codec_, stream_->codecpar) < 0) {
+            error_ = "cannot initialize the video decoder";
+            return false;
+        }
+        // FFmpeg's default is one decode thread. Let it pick the automatic
+        // count so high-resolution HEVC can keep up with real time.
+        codec_->thread_count = 0;
+        codec_->pkt_timebase = stream_->time_base;
+        if (avcodec_open2(codec_, codec, nullptr) < 0) {
             error_ = "cannot initialize the video decoder";
             return false;
         }
@@ -650,8 +657,14 @@ public:
         }
         AVCodecContext* nextCodec = avcodec_alloc_context3(decoder);
         if (nextCodec == nullptr ||
-            avcodec_parameters_to_context(nextCodec, nextStream->codecpar) < 0 ||
-            avcodec_open2(nextCodec, decoder, nullptr) < 0) {
+            avcodec_parameters_to_context(nextCodec, nextStream->codecpar) < 0) {
+            avcodec_free_context(&nextCodec);
+            error_ = "cannot initialize the selected video track";
+            return false;
+        }
+        nextCodec->thread_count = 0;
+        nextCodec->pkt_timebase = nextStream->time_base;
+        if (avcodec_open2(nextCodec, decoder, nullptr) < 0) {
             avcodec_free_context(&nextCodec);
             error_ = "cannot initialize the selected video track";
             return false;
@@ -1585,6 +1598,13 @@ struct Player::Impl {
             } else {
                 paused = !status_.paused;
                 status_.paused = paused;
+                if (paused && !status_.hasFrame) {
+                    // Pausing before the decoder produced a frame would leave
+                    // the cell black. Decode the frame at the current position
+                    // and keep it visible while the video stays paused.
+                    status_.ended = false;
+                    seekRequest_ = status_.position;
+                }
             }
         }
         paused_ = paused;
