@@ -186,8 +186,12 @@ timestamp for a backward step.
 
 Audio is a separate FFmpeg decode thread in the same player. It converts decoded
 audio with libswresample to packed stereo float at 48 kHz, writes it into a
-lock-free ring buffer and a miniaudio playback device consumes it. Pause, seek
-and volume/mute commands are atomic or mutex-protected; seeking stops the device,
+lock-free ring buffer and a miniaudio playback device consumes it. The device is
+initialized and uninitialized on that decode thread, so its private miniaudio
+context balances its own COM initialization there. The device starts when the
+decoder is ready to show the first picture, and at stream EOF the thread waits
+for the queued samples to play out before it stops the device. Pause, seek and
+volume/mute commands are atomic or mutex-protected; seeking stops the device,
 flushes the ring and decoder, then restarts it. If the file has no audio stream
 or the device cannot initialize, the video keeps playing; the global volume
 group remains available for other videos in the window.

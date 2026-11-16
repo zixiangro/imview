@@ -884,11 +884,9 @@ public:
         stop_ = true;
         commandCv_.notify_all();
         if (worker_.joinable()) worker_.join();
-        if (deviceReady_) {
-            ma_device_uninit(&device_);
-            deviceReady_ = false;
-        }
+        // The worker uninitializes its device before it returns; see run().
         deviceStarted_ = false;
+        deviceReady_ = false;
         hasAudio_ = false;
     }
 
@@ -1159,6 +1157,22 @@ private:
             if (readResult < 0) {
                 if (readResult == AVERROR_EXIT) break;
                 if (readResult == AVERROR_EOF) {
+                    // The decoder runs ahead of the device, so at EOF up to a
+                    // full ring of decoded audio may still be waiting to play.
+                    // Stopping the device here would cut the tail off and make
+                    // the track end early; let it drain first. Pausing or
+                    // seeking keeps the queued samples for a later retry.
+                    while (deviceStarted_ && !stop_ && !paused_ &&
+                           !seekPending_.load() &&
+                           readFrame_.load(std::memory_order_acquire) <
+                               writeFrame_.load(std::memory_order_acquire)) {
+                        std::unique_lock lock(commandMutex_);
+                        commandCv_.wait_for(lock, std::chrono::milliseconds(5), [this] {
+                            return stop_.load() || paused_.load() || seekPending_.load();
+                        });
+                    }
+                    if (stop_) break;
+                    if (paused_ || seekPending_.load()) continue;
                     // Stop at the end instead of looping. A seek (video
                     // transport, sync restart) clears this and resumes.
                     ended_ = true;
@@ -1207,7 +1221,22 @@ private:
             }
         }
 
+        releaseDevice();
         cleanup();
+    }
+
+    // miniaudio creates a private context for a null-context device and calls
+    // CoInitializeEx on the thread that runs ma_device_init; ma_device_uninit
+    // then calls CoUninitialize on its calling thread. Uninitializing from the
+    // UI thread would tear down the OLE apartment that hosts the drop target,
+    // so the worker owns both ends.
+    void releaseDevice() {
+        if (deviceReady_) {
+            ma_device_uninit(&device_);
+            deviceReady_ = false;
+        }
+        deviceStarted_ = false;
+        hasAudio_ = false;
     }
 
     std::string path_;
@@ -1527,7 +1556,10 @@ struct Player::Impl {
         {
             std::lock_guard audioLock(audioOpMutex_);
             audio_ = std::make_unique<AudioPlayer>();
-            audio_->open(path_, 0, 0.0, false);
+            // Stay paused until the video clock starts: opening the decoder
+            // and probing the stream can take a moment, and audio that starts
+            // earlier would drift ahead of the picture.
+            audio_->open(path_, 0, 0.0, true);
             audio_->setVolume(volume_);
             audio_->setMuted(muted_);
         }
@@ -1848,6 +1880,9 @@ private:
         if (defaultAudio >= 0 && defaultAudio != audioStartedTrack_) {
             applyAudioTrack(defaultAudio);
         }
+        // The decoder is ready, so the picture is about to start; let the
+        // audio device run from here unless the user paused in between.
+        if (!paused_) audioPause(false);
         core::platform::requestUiUpdate();
     }
 

@@ -55,9 +55,11 @@
   subtitles share the same list. The `CC` button independently shows or hides
   subtitles.
 - Audio and video are separate decoders. Audio is resampled to stereo float at
-  48 kHz, buffered and played through the default device. The window has one
-  global volume slider and mute button in the title bar: every video follows
-  it, including in a mixed image/video grid, and a new window starts at 50%.
+  48 kHz, buffered and played through the default device. Playback starts with
+  the first displayed picture and the samples still buffered at the end of the
+  stream play out before the device stops. The window has one global volume
+  slider and mute button in the title bar: every video follows it, including in
+  a mixed image/video grid, and a new window starts at 50%.
 - The close and move buttons are the same as image cells and auto-hide with the
   same cell hot zone. Videos cannot be rotated.
 - While images and videos share the grid, all image-only features are disabled:
